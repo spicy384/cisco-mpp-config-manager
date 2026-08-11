@@ -1,0 +1,14 @@
+# Store everything with LF in the repository and check out with native line
+# endings. Without this, a commit from Windows can rewrite whole files as CRLF
+# and produce diffs that touch every line.
+* text=auto
+
+# These must stay LF even in a Windows working copy: CRLF breaks shell scripts
+# and can confuse tooling that reads them inside a Linux container.
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+
+# Generated: collapsed by default in GitHub diffs, but still readable locally.
+package-lock.json linguist-generated=true

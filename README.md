@@ -183,3 +183,8 @@ Override with `MOCK_FILE_COUNT` and `MOCK_LATENCY_MS`.
 - Saved PBX server profiles are stored in `data/servers.json`.
 - XML is rebuilt on save, so formatting/comments may differ from source files. Bulk edit
   only rewrites files it actually changes, so unaffected files are left byte-for-byte alone.
+- The `data/` directory holds saved servers, templates and the change log. It is gitignored
+  and must stay that way: templates can contain phone admin passwords.
+
+## License
+MIT - see [LICENSE](LICENSE).

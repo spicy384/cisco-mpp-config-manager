@@ -1,19 +1,27 @@
 ﻿# PBX MPP Config Manager
 
-Small web app to connect to FreePBX over SFTP, list Cisco MPP `.xml` config files, view/edit fields, and upload saved/new configs.
+Small web app to connect to FreePBX over SFTP, list Cisco MPP `.xml` config files, view and
+edit fields, and upload saved or new configs. Runs as a container on a management server.
 
 ## Features
-- Save multiple PBX server profiles (host/port/user/remote dir) and connect using only password
-- List `.xml` files with `Station_Display_Name` shown under each filename
-- Open/edit XML as tag/value/attributes rows
-- Soft-delete rows with one-click Undo
-- Reset editor to the last loaded/saved state
-- Hide/Show tags where the value is empty
-- Save buttons at top and bottom of the editor
-- Create new config files and upload
-- Full starter field set based on your provided standard template
+**Accounts**
+- Sign-in with per-user accounts, optional TOTP two-factor and single-use recovery codes
+- Administrator and user roles; every write is attributed to the user who made it
+- Can run behind an authentication reverse proxy instead (Authelia, Authentik, oauth2-proxy)
+
+**Editing**
+- Save multiple PBX server profiles (host/port/user/remote dir) and connect using only a password
+- File list led by `Station_Display_Name`, since config file names are MAC addresses
+- Open and edit XML as tag/value/attribute rows, with a sticky header for large configs
+- Soft-delete rows with one-click Undo, duplicate rows, reset to the last loaded state
+- Show only important fields, or hide empty ones; search across tag, value and attributes
+- `Ctrl`/`Cmd`+`S` to save; Save buttons at the top and bottom of the editor
+- Create new config files from a template and upload them
+
+**Bulk changes and history**
 - Bulk edit one tag across many config files at once, preview-first, with live progress
-- Per-server change log of every write, retained between connections
+- Per-server change log of every write, showing field-level before and after, kept between
+  connections and exportable to CSV
 
 ## Bulk Edit
 Change a single setting across all (or selected) phone configs without opening each file.
@@ -44,15 +52,20 @@ Safety behaviour:
   and the remaining files still process.
 
 ## Quick Start
+For a server deployment see [Running in Docker](#running-in-docker). To run it directly:
+
 1. Install dependencies:
    ```powershell
    npm install
    ```
-2. Start app:
+2. Start the app:
    ```powershell
    npm start
    ```
-3. Open browser: [http://localhost:3000](http://localhost:3000)
+3. Open [http://localhost:3000](http://localhost:3000).
+4. Create the first administrator when prompted, and enrol two-factor if you want it. See
+   [Accounts and two-factor authentication](#accounts-and-two-factor-authentication).
+5. Add a PBX server profile, enter its password, and connect.
 
 ## Change Log
 Every write the app makes to a phone config is recorded: bulk edits, single-file saves, and
@@ -61,11 +74,14 @@ new file creation. Previews are **not** logged, because they change nothing.
 Editor saves are diffed against the file's previous contents, so the log names the exact
 fields that moved rather than just "the file was saved":
 
-| Action | Phone | File | Tag | Before | After |
-|---|---|---|---|---|---|
-| Changed field | Front Desk - 7001 | `spa001.xml` | `Voice_Mail_Number` | `*97` | `*555` |
-| Added field | Front Desk - 7001 | `spa001.xml` | `Time_Zone` | (not set) | `GMT+10:00` |
-| Removed field | Kitchen - 7002 | `spa002.xml` | `Admin_Passwd` | `secret` | (removed) |
+| User | Action | Phone | File | Tag | Before | After |
+|---|---|---|---|---|---|---|
+| alice | Changed field | Front Desk - 7001 | `spa001.xml` | `Voice_Mail_Number` | `*97` | `*555` |
+| alice | Added field | Front Desk - 7001 | `spa001.xml` | `Time_Zone` | (not set) | `GMT+10:00` |
+| bob | Removed field | Kitchen - 7002 | `spa002.xml` | `Admin_Passwd` | `secret` | (removed) |
+
+The **User** column is the signed-in account that made the change. Entries written before
+authentication was added show `-`.
 
 The **Phone** column is the file's `Station_Display_Name`, since config file names are MAC
 addresses. It records the name as it was *before* the change, so a row that renames a phone
@@ -97,10 +113,10 @@ docker compose up -d --build
 Then browse to <http://localhost:3000> **on the management server itself**.
 
 ### Read this before exposing it
-This app has **no login of its own**. Anyone who can reach its port can read your saved
-server profiles (host, username, remote directory) and the full change log, and can push
-config to every phone on the PBX. They would still need the SFTP password to connect, but
-treat the port as sensitive.
+The app requires a sign-in with optional two-factor (see
+[Accounts and two-factor authentication](#accounts-and-two-factor-authentication)), but it
+still speaks plain HTTP. Over anything other than loopback that means passwords and session
+cookies cross the network in the clear, so put TLS in front before exposing it.
 
 `docker-compose.yml` therefore publishes to **loopback only** (`127.0.0.1:3000:3000`).
 To reach it from another machine, pick one:
@@ -148,12 +164,61 @@ The container logs which template it resolved at startup, so check `docker compo
 | `DATA_DIR` | `./data` (`/data` in the image) | Where the JSON stores are written |
 | `DEFAULT_TEMPLATE_PATH` | unset | Explicit path to the default template XML |
 | `TZ` | `UTC` | Affects timestamps shown in the change log |
+| `COOKIE_SECURE` | `false` | Set `true` when serving over HTTPS so the session cookie is marked Secure |
+| `TRUST_PROXY_AUTH` | `false` | Accept a reverse proxy's authentication header (see above) |
+| `PROXY_USER_HEADER` | `remote-user` | Which header carries the username in that mode |
 
 ### Updating
 ```bash
 docker compose up -d --build
 ```
 The volume is untouched by a rebuild, so your servers and change log carry over.
+
+## Accounts and two-factor authentication
+The app has its own sign-in. On first run it asks you to create an administrator, then
+offers to enrol two-factor straight away.
+
+- **Passwords** are hashed with scrypt (salted, per-user). They are never stored or logged
+  in plain text and never leave the server.
+- **Two-factor** is standard TOTP (RFC 6238), so any authenticator works - Google
+  Authenticator, Aegis, 1Password, Bitwarden. Enrol by scanning the QR code, or type the
+  secret in by hand.
+- **Recovery codes**: ten single-use codes are issued at enrolment and shown once. Save
+  them - they are stored hashed and cannot be recovered, only regenerated.
+- **A used TOTP code cannot be replayed**, including the one used to enrol. If you enrol
+  and immediately sign out, wait for the next code.
+- **Lockout**: five failed attempts locks an account for 15 minutes.
+- **Sessions** last 7 days, or 8 hours idle, and survive a restart. Sign out ends them
+  immediately.
+
+### Roles
+| Role | Can do |
+|---|---|
+| Administrator | Everything, plus add/remove users and reset another user's two-factor |
+| User | Connect to a PBX, edit and bulk edit configs, read the change log |
+
+Every write records **which user made it** in the Change Log. Entries written before
+authentication existed show `-`.
+
+### If someone loses their authenticator
+An administrator opens **Users** and clicks **Reset MFA**. That user can then sign in with
+their password alone and enrol again. If the *only* administrator is locked out, stop the
+container, edit `users.json` in the data directory, set `"mfaEnrolled": false` and
+`"totpSecret": null` on that account, and start it again.
+
+### Behind a reverse proxy
+If you would rather have Authelia, Authentik or oauth2-proxy handle sign-in, set:
+
+```
+TRUST_PROXY_AUTH=true
+PROXY_USER_HEADER=remote-user
+```
+
+The app then trusts that header to name the signed-in user, who must still exist as an
+account here (create them first, password unused). **Only enable this when the proxy strips
+the header from incoming client requests and the app is not reachable any other way** -
+otherwise anyone who reaches the port can impersonate any user by setting the header. The
+app prints a warning at startup whenever this mode is on.
 
 ## Example template
 `examples/default-template.xml` is a complete 441-field Cisco MPP `flat-profile` config used
@@ -174,12 +239,17 @@ To make your own the default, drop it at `data/default-template.xml` (that direc
 gitignored) or point `DEFAULT_TEMPLATE_PATH` at it. Either takes precedence over the example.
 
 ## Notes
-- Passwords are not persisted; they are required at connect time.
-- Saved PBX server profiles are stored in `data/servers.json`.
-- XML is rebuilt on save, so formatting/comments may differ from source files. Bulk edit
-  only rewrites files it actually changes, so unaffected files are left byte-for-byte alone.
-- The `data/` directory holds saved servers, templates and the change log. It is gitignored
-  and must stay that way: templates can contain phone admin passwords.
+- **SFTP passwords are never persisted** - you type them at connect time. Only the profile
+  (host, port, username, remote directory) is saved.
+- XML is rebuilt on save, so formatting and comments may differ from the source file. Bulk
+  edit only rewrites files it actually changes, so unaffected files are left untouched.
+- The **SFTP connection is shared**: once someone connects, any signed-in user works through
+  that connection. The change log records who did what, but users are not isolated from one
+  another. Give accounts only to people you would trust with the PBX password.
+- The `data/` directory holds accounts, sessions, saved servers, templates and the change
+  log. It is gitignored and must stay that way - it contains password hashes, TOTP secrets
+  and templates that may carry phone admin passwords.
+- Values are trimmed of leading and trailing whitespace when a config is parsed.
 
 ## License
 MIT - see [LICENSE](LICENSE).

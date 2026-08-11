@@ -16,7 +16,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY server.js ./
+COPY server.js auth.js auth-routes.js ./
 COPY public ./public
 # Bundled placeholder template; a real one mounted at /data takes precedence.
 COPY examples ./examples
@@ -29,9 +29,10 @@ USER node
 EXPOSE 3000
 VOLUME ["/data"]
 
-# Uses the app's own status endpoint, so this fails if Express stops responding.
+# Probes /api/auth/me: it is the one endpoint that answers 200 whether or not
+# anyone is signed in, so the check reflects "Express is serving", not "logged in".
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD node -e "require('http').get({host:'127.0.0.1',port:process.env.PORT||3000,path:'/api/status',timeout:4000},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+  CMD node -e "require('http').get({host:'127.0.0.1',port:process.env.PORT||3000,path:'/api/auth/me',timeout:4000},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "server.js"]

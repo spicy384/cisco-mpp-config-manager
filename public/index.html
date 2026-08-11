@@ -21,6 +21,11 @@
         </div>
       </div>
 
+      <div class="header-actions">
+        <span id="current-user" class="badge" hidden></span>
+        <button id="account-btn" type="button" class="secondary small" hidden>Account</button>
+        <button id="users-btn" type="button" class="secondary small" hidden>Users</button>
+        <button id="logout-btn" type="button" class="secondary small" hidden>Sign out</button>
       <button id="theme-toggle" type="button" class="secondary icon-btn">
         <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
           <circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
@@ -30,8 +35,91 @@
         </svg>
         <span class="theme-label">Dark Theme</span>
       </button>
+      </div>
     </div>
   </header>
+
+  <!-- Covers the app until the user is signed in. -->
+  <div id="auth-overlay" class="auth-overlay" hidden>
+    <div class="auth-card">
+      <div class="auth-brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" />
+          </svg>
+        </span>
+        <h2 id="auth-title">Sign in</h2>
+      </div>
+
+      <p id="auth-message" class="auth-message" hidden></p>
+
+      <!-- Step 1: username + password -->
+      <form id="auth-login-form" class="auth-form">
+        <label>Username <input id="auth-username" autocomplete="username" required /></label>
+        <label>Password <input id="auth-password" type="password" autocomplete="current-password" required /></label>
+        <button type="submit">Sign in</button>
+      </form>
+
+      <!-- Step 2: authenticator code -->
+      <form id="auth-mfa-form" class="auth-form" hidden>
+        <label>Authentication code
+          <input id="auth-mfa-code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" />
+        </label>
+        <button type="submit">Verify</button>
+        <button type="button" id="auth-use-recovery" class="link-btn">Use a recovery code instead</button>
+      </form>
+
+      <!-- Step 2 (alternate): recovery code -->
+      <form id="auth-recovery-form" class="auth-form" hidden>
+        <label>Recovery code
+          <input id="auth-recovery-code" placeholder="xxxxxxxx-xxxxxxxx" />
+        </label>
+        <button type="submit">Sign in</button>
+        <button type="button" id="auth-use-totp" class="link-btn">Back to authenticator code</button>
+      </form>
+
+      <!-- First run -->
+      <form id="auth-setup-form" class="auth-form" hidden>
+        <p class="auth-hint">No accounts exist yet. Create the first administrator.</p>
+        <label>Username <input id="setup-username" autocomplete="username" placeholder="admin" /></label>
+        <label>Password (12 characters minimum)
+          <input id="setup-password" type="password" autocomplete="new-password" />
+        </label>
+        <label>Confirm password <input id="setup-password2" type="password" autocomplete="new-password" /></label>
+        <button type="submit">Create administrator</button>
+      </form>
+
+      <!-- MFA enrolment -->
+      <div id="auth-enrol" class="auth-form" hidden>
+        <p class="auth-hint">Scan this with your authenticator app, then enter the code it shows.</p>
+        <img id="enrol-qr" class="enrol-qr" alt="TOTP enrolment QR code" />
+        <label>Or enter this secret manually
+          <input id="enrol-secret" class="mono" readonly />
+        </label>
+        <label>Code from your app
+          <input id="enrol-code" inputmode="numeric" placeholder="123456" />
+        </label>
+        <div class="actions">
+          <button type="button" id="enrol-confirm">Enable two-factor</button>
+          <button type="button" id="enrol-skip" class="secondary">Skip for now</button>
+        </div>
+      </div>
+
+      <!-- Recovery codes, shown once -->
+      <div id="auth-recovery-codes" class="auth-form" hidden>
+        <p class="auth-hint">
+          <strong>Save these recovery codes now.</strong> Each works once if you lose your
+          authenticator. They will not be shown again.
+        </p>
+        <pre id="recovery-code-list" class="recovery-list mono"></pre>
+        <div class="actions">
+          <button type="button" id="recovery-copy" class="secondary">Copy</button>
+          <button type="button" id="recovery-download" class="secondary">Download</button>
+          <button type="button" id="recovery-done">I have saved them</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <main>
     <section class="panel" id="connection-panel">
@@ -235,6 +323,60 @@
       </div>
 
       <div id="log-results" class="bulk-results"></div>
+    </section>
+
+    <section class="panel" id="users-panel" hidden>
+      <div class="panel-head">
+        <h2>Users</h2>
+        <span id="users-count" class="badge">0 users</span>
+      </div>
+      <p class="bulk-hint">
+        Everyone who signs in gets their own account, and the Change Log records which user
+        made each change. Two-factor is enrolled by each user from <strong>Account</strong>.
+      </p>
+
+      <div class="bulk-controls">
+        <label>Username <input id="new-username" placeholder="operator" /></label>
+        <label>Password (12 characters minimum) <input id="new-password" type="password" /></label>
+        <label>Role
+          <select id="new-role">
+            <option value="user">User</option>
+            <option value="admin">Administrator</option>
+          </select>
+        </label>
+        <button id="add-user-btn" type="button">Add User</button>
+      </div>
+
+      <div id="users-results" class="bulk-results"></div>
+    </section>
+
+    <section class="panel" id="account-panel" hidden>
+      <div class="panel-head">
+        <h2>Account</h2>
+        <span id="account-mfa-state" class="badge">Two-factor: off</span>
+      </div>
+
+      <div class="account-grid">
+        <div>
+          <h3 class="account-heading">Change password</h3>
+          <label>Current password <input id="acct-current" type="password" /></label>
+          <label>New password (12 characters minimum) <input id="acct-new" type="password" /></label>
+          <div class="actions">
+            <button id="acct-change-password" type="button">Change password</button>
+          </div>
+        </div>
+
+        <div>
+          <h3 class="account-heading">Two-factor authentication</h3>
+          <p class="bulk-hint" id="acct-mfa-hint">
+            Protects your account if your password is ever guessed or reused.
+          </p>
+          <div class="actions">
+            <button id="acct-enable-mfa" type="button">Set up two-factor</button>
+            <button id="acct-disable-mfa" type="button" class="ghost-danger" hidden>Turn off two-factor</button>
+          </div>
+        </div>
+      </div>
     </section>
   </main>
 

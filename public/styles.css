@@ -937,6 +937,168 @@ body.connection-collapsed #connection-panel {
 }
 
 /* ============================================================
+   Authentication
+   ============================================================ */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  overflow: auto;
+  background:
+    radial-gradient(900px 400px at 50% 0%, var(--bg-accent) 0%, transparent 70%),
+    var(--bg);
+}
+
+.auth-overlay[hidden] {
+  display: none !important;
+}
+
+/* Stops the app behind the overlay from being scrolled or tabbed into. */
+body.auth-locked {
+  overflow: hidden;
+}
+
+body.auth-locked main,
+body.auth-locked header .brand,
+body.auth-locked .header-actions {
+  filter: blur(2px);
+  pointer-events: none;
+  user-select: none;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 420px;
+  padding: 26px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-bottom: 18px;
+}
+
+.auth-form {
+  display: grid;
+  gap: 13px;
+}
+
+.auth-form[hidden] {
+  display: none !important;
+}
+
+.auth-form button[type="submit"],
+.auth-form > .actions {
+  margin-top: 3px;
+}
+
+.auth-hint {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.auth-message {
+  margin-bottom: 14px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.auth-message.is-error {
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-weight: 550;
+}
+
+.auth-message[hidden] {
+  display: none !important;
+}
+
+.link-btn {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--primary);
+  font-size: 12.5px;
+  font-weight: 550;
+  text-decoration: underline;
+  justify-self: start;
+}
+
+.link-btn:hover:not(:disabled) {
+  background: none;
+  color: var(--primary-hover);
+}
+
+.enrol-qr {
+  display: block;
+  width: 200px;
+  height: 200px;
+  margin: 0 auto;
+  border-radius: var(--radius-sm);
+  background: #fff;
+  padding: 8px;
+}
+
+.recovery-list {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 13px;
+  line-height: 1.7;
+  letter-spacing: 0.02em;
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--text);
+}
+
+.account-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 24px;
+  align-items: start;
+}
+
+.account-grid > div {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.account-heading {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+#users-panel[hidden],
+#account-panel[hidden] {
+  display: none !important;
+}
+
+/* ============================================================
    Responsive
    ============================================================ */
 @media (max-width: 1100px) {

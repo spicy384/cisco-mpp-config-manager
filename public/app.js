@@ -153,16 +153,33 @@ function setConnectionCollapsed(collapsed, connectionData = null) {
   }
 }
 
-async function api(path, options = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...options
-  });
+let csrfToken = null;
+let currentUser = null;
 
+async function api(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (csrfToken) {
+    headers["X-CSRF-Token"] = csrfToken;
+  }
+
+  const res = await fetch(path, { ...options, headers });
   const data = await res.json().catch(() => ({}));
+
   if (!res.ok) {
+    // A 401 from the sign-in endpoints means "those credentials were wrong", not
+    // "your session expired" - only the latter should bounce back to the login screen.
+    const isAuthAttempt = path.startsWith("/api/auth/");
+
+    if (!isAuthAttempt && (res.status === 401 || (res.status === 409 && data.setupRequired))) {
+      csrfToken = null;
+      currentUser = null;
+      showAuthOverlay(data.setupRequired ? "setup" : "login");
+      throw new Error(data.setupRequired ? "Setup required." : "Your session has expired. Sign in again.");
+    }
+
     throw new Error(data.error || `Request failed (${res.status})`);
   }
+
   return data;
 }
 
@@ -953,6 +970,7 @@ function getFilteredLogEntries() {
     const haystack = [
       entry.file,
       entry.station,
+      entry.user,
       entry.tag,
       entry.before,
       entry.after,
@@ -980,7 +998,7 @@ function renderLogEntries() {
   const table = document.createElement("table");
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
-  for (const label of ["When", "Action", "Phone", "File", "Tag", "Before", "After", "Result"]) {
+  for (const label of ["When", "User", "Action", "Phone", "File", "Tag", "Before", "After", "Result"]) {
     const th = document.createElement("th");
     th.textContent = label;
     headRow.appendChild(th);
@@ -995,6 +1013,8 @@ function renderLogEntries() {
 
     const cells = [
       formatTimestamp(entry.ts),
+      // Entries written before authentication existed have no user recorded.
+      entry.user || "-",
       LOG_ACTION_LABEL[entry.action] || entry.action,
       // Entries written before station tracking existed have no station field.
       entry.station || "-",
@@ -1033,12 +1053,13 @@ function exportLogCsv() {
     return `"${safe.replace(/"/g, '""')}"`;
   };
 
-  const header = ["When", "Action", "Phone", "File", "Tag", "Before", "After", "Result"];
+  const header = ["When", "User", "Action", "Phone", "File", "Tag", "Before", "After", "Result"];
   const lines = [header.map(cell).join(",")];
 
   for (const entry of rows) {
     lines.push([
       formatTimestamp(entry.ts),
+      entry.user || "",
       LOG_ACTION_LABEL[entry.action] || entry.action,
       entry.station || "",
       entry.file || "",
@@ -1337,8 +1358,426 @@ saveTemplateBtn.addEventListener("click", async () => {
   }
 });
 
-(async function init() {
-  applyTheme(localStorage.getItem("pbx-theme") || "light");
+// ===========================================================================
+// Authentication
+// ===========================================================================
+const authOverlay = document.getElementById("auth-overlay");
+const authTitle = document.getElementById("auth-title");
+const authMessage = document.getElementById("auth-message");
+const authLoginForm = document.getElementById("auth-login-form");
+const authMfaForm = document.getElementById("auth-mfa-form");
+const authRecoveryForm = document.getElementById("auth-recovery-form");
+const authSetupForm = document.getElementById("auth-setup-form");
+const authEnrol = document.getElementById("auth-enrol");
+const authRecoveryCodes = document.getElementById("auth-recovery-codes");
+
+const currentUserEl = document.getElementById("current-user");
+const accountBtn = document.getElementById("account-btn");
+const usersBtn = document.getElementById("users-btn");
+const logoutBtn = document.getElementById("logout-btn");
+const usersPanel = document.getElementById("users-panel");
+const accountPanel = document.getElementById("account-panel");
+const usersResultsEl = document.getElementById("users-results");
+const usersCountEl = document.getElementById("users-count");
+
+let pendingLoginToken = null;
+let issuedRecoveryCodes = [];
+
+const AUTH_STEPS = {
+  login: authLoginForm,
+  mfa: authMfaForm,
+  recovery: authRecoveryForm,
+  setup: authSetupForm,
+  enrol: authEnrol,
+  codes: authRecoveryCodes
+};
+
+const AUTH_TITLES = {
+  login: "Sign in",
+  mfa: "Two-factor authentication",
+  recovery: "Use a recovery code",
+  setup: "Welcome - create your administrator",
+  enrol: "Set up two-factor authentication",
+  codes: "Save your recovery codes"
+};
+
+function showAuthOverlay(step) {
+  authOverlay.hidden = false;
+  document.body.classList.add("auth-locked");
+  setAuthStep(step);
+}
+
+function hideAuthOverlay() {
+  authOverlay.hidden = true;
+  document.body.classList.remove("auth-locked");
+  setAuthMessage("");
+}
+
+function setAuthStep(step) {
+  for (const [name, el] of Object.entries(AUTH_STEPS)) {
+    el.hidden = name !== step;
+  }
+  authTitle.textContent = AUTH_TITLES[step] || "Sign in";
+  setAuthMessage("");
+
+  const focus = {
+    login: "auth-username", mfa: "auth-mfa-code", recovery: "auth-recovery-code",
+    setup: "setup-username", enrol: "enrol-code"
+  }[step];
+  if (focus) {
+    setTimeout(() => document.getElementById(focus)?.focus(), 30);
+  }
+}
+
+function setAuthMessage(text, isError = true) {
+  authMessage.textContent = text || "";
+  authMessage.hidden = !text;
+  authMessage.classList.toggle("is-error", isError);
+}
+
+/** Applies the signed-in identity to the chrome and reveals admin-only controls. */
+function applyIdentity(user, token) {
+  currentUser = user;
+  csrfToken = token;
+
+  const signedIn = Boolean(user);
+  currentUserEl.hidden = !signedIn;
+  accountBtn.hidden = !signedIn;
+  logoutBtn.hidden = !signedIn;
+  usersBtn.hidden = !signedIn || user.role !== "admin";
+
+  if (signedIn) {
+    currentUserEl.textContent = user.role === "admin" ? `${user.username} (admin)` : user.username;
+  }
+
+  if (!signedIn) {
+    usersPanel.hidden = true;
+    accountPanel.hidden = true;
+  }
+}
+
+async function refreshIdentity() {
+  const me = await (await fetch("/api/auth/me")).json();
+
+  if (me.setupRequired) {
+    applyIdentity(null, null);
+    showAuthOverlay("setup");
+    return false;
+  }
+
+  if (!me.authenticated) {
+    applyIdentity(null, null);
+    showAuthOverlay("login");
+    return false;
+  }
+
+  applyIdentity(me.user, me.csrfToken);
+  hideAuthOverlay();
+  return true;
+}
+
+authSetupForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const username = document.getElementById("setup-username").value.trim();
+  const password = document.getElementById("setup-password").value;
+  const confirm2 = document.getElementById("setup-password2").value;
+
+  if (password !== confirm2) {
+    setAuthMessage("Passwords do not match.");
+    return;
+  }
+
+  try {
+    const data = await api("/api/auth/setup", { method: "POST", body: JSON.stringify({ username, password }) });
+    applyIdentity(data.user, data.csrfToken);
+    await beginEnrolment();
+  } catch (error) {
+    setAuthMessage(error.message);
+  }
+});
+
+authLoginForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const username = document.getElementById("auth-username").value.trim();
+  const password = document.getElementById("auth-password").value;
+
+  try {
+    const data = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) });
+    document.getElementById("auth-password").value = "";
+
+    if (data.mfaRequired) {
+      pendingLoginToken = data.pendingToken;
+      setAuthStep("mfa");
+      return;
+    }
+
+    applyIdentity(data.user, data.csrfToken);
+    // Nudge, do not force: an operator locked out mid-incident helps nobody.
+    if (data.mfaSetupRequired) {
+      await beginEnrolment();
+      return;
+    }
+    await onSignedIn();
+  } catch (error) {
+    setAuthMessage(error.message);
+  }
+});
+
+authMfaForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const data = await api("/api/auth/login/mfa", {
+      method: "POST",
+      body: JSON.stringify({ pendingToken: pendingLoginToken, code: document.getElementById("auth-mfa-code").value })
+    });
+    document.getElementById("auth-mfa-code").value = "";
+    applyIdentity(data.user, data.csrfToken);
+    await onSignedIn();
+  } catch (error) {
+    setAuthMessage(error.message);
+  }
+});
+
+authRecoveryForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const data = await api("/api/auth/login/recovery", {
+      method: "POST",
+      body: JSON.stringify({ pendingToken: pendingLoginToken, code: document.getElementById("auth-recovery-code").value })
+    });
+    document.getElementById("auth-recovery-code").value = "";
+    applyIdentity(data.user, data.csrfToken);
+    await onSignedIn();
+    setStatus(`Signed in with a recovery code. ${data.recoveryCodesRemaining} remaining.`, data.recoveryCodesRemaining === 0);
+  } catch (error) {
+    setAuthMessage(error.message);
+  }
+});
+
+document.getElementById("auth-use-recovery").addEventListener("click", () => setAuthStep("recovery"));
+document.getElementById("auth-use-totp").addEventListener("click", () => setAuthStep("mfa"));
+
+async function beginEnrolment() {
+  try {
+    const data = await api("/api/auth/mfa/setup", { method: "POST", body: "{}" });
+    document.getElementById("enrol-qr").src = data.qrDataUrl;
+    document.getElementById("enrol-secret").value = data.secret;
+    showAuthOverlay("enrol");
+  } catch (error) {
+    setAuthMessage(error.message);
+  }
+}
+
+document.getElementById("enrol-confirm").addEventListener("click", async () => {
+  try {
+    const data = await api("/api/auth/mfa/confirm", {
+      method: "POST",
+      body: JSON.stringify({ code: document.getElementById("enrol-code").value })
+    });
+    issuedRecoveryCodes = data.recoveryCodes || [];
+    document.getElementById("recovery-code-list").textContent = issuedRecoveryCodes.join("\n");
+    setAuthStep("codes");
+  } catch (error) {
+    setAuthMessage(error.message);
+  }
+});
+
+document.getElementById("enrol-skip").addEventListener("click", async () => {
+  await onSignedIn();
+});
+
+document.getElementById("recovery-copy").addEventListener("click", () => {
+  navigator.clipboard?.writeText(issuedRecoveryCodes.join("\n"));
+  setAuthMessage("Copied to clipboard.", false);
+});
+
+document.getElementById("recovery-download").addEventListener("click", () => {
+  const blob = new Blob([issuedRecoveryCodes.join("\r\n")], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "pbx-manager-recovery-codes.txt";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+});
+
+document.getElementById("recovery-done").addEventListener("click", async () => {
+  issuedRecoveryCodes = [];
+  await onSignedIn();
+});
+
+logoutBtn.addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", { method: "POST", body: "{}" });
+  } catch {
+    // Signing out locally is what matters even if the call failed.
+  }
+  applyIdentity(null, null);
+  currentFile = "";
+  allFiles = [];
+  selectedFiles.clear();
+  fileListEl.innerHTML = "";
+  clearRows();
+  showAuthOverlay("login");
+});
+
+accountBtn.addEventListener("click", () => {
+  accountPanel.hidden = !accountPanel.hidden;
+  usersPanel.hidden = true;
+  if (!accountPanel.hidden) {
+    renderAccountPanel();
+    accountPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+});
+
+usersBtn.addEventListener("click", async () => {
+  usersPanel.hidden = !usersPanel.hidden;
+  accountPanel.hidden = true;
+  if (!usersPanel.hidden) {
+    await refreshUsers();
+    usersPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+});
+
+function renderAccountPanel() {
+  const enrolled = Boolean(currentUser?.mfaEnrolled);
+  document.getElementById("account-mfa-state").textContent = `Two-factor: ${enrolled ? "on" : "off"}`;
+  document.getElementById("acct-enable-mfa").hidden = enrolled;
+  document.getElementById("acct-disable-mfa").hidden = !enrolled;
+}
+
+document.getElementById("acct-enable-mfa").addEventListener("click", beginEnrolment);
+
+document.getElementById("acct-disable-mfa").addEventListener("click", async () => {
+  const password = prompt("Confirm your password to turn off two-factor authentication:");
+  if (!password) {
+    return;
+  }
+  try {
+    await api("/api/auth/mfa/disable", { method: "POST", body: JSON.stringify({ password }) });
+    await refreshIdentity();
+    renderAccountPanel();
+    setStatus("Two-factor authentication turned off.", true);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+document.getElementById("acct-change-password").addEventListener("click", async () => {
+  const currentPassword = document.getElementById("acct-current").value;
+  const newPassword = document.getElementById("acct-new").value;
+  try {
+    await api("/api/auth/password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) });
+    document.getElementById("acct-current").value = "";
+    document.getElementById("acct-new").value = "";
+    setStatus("Password changed.");
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+async function refreshUsers() {
+  const data = await api("/api/users");
+  const users = data.users || [];
+  usersCountEl.textContent = `${users.length} user${users.length === 1 ? "" : "s"}`;
+  usersResultsEl.replaceChildren();
+
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["Username", "Role", "Two-factor", "Last sign-in", ""]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const user of users) {
+    const tr = document.createElement("tr");
+    for (const text of [
+      user.username,
+      user.role === "admin" ? "Administrator" : "User",
+      user.mfaEnrolled ? "Enabled" : "Not set up",
+      user.lastLoginAt ? formatTimestamp(user.lastLoginAt) : "Never"
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+
+    const actions = document.createElement("td");
+    const wrap = document.createElement("div");
+    wrap.className = "row-actions";
+
+    const resetBtn2 = document.createElement("button");
+    resetBtn2.className = "secondary small";
+    resetBtn2.textContent = "Reset MFA";
+    resetBtn2.addEventListener("click", async () => {
+      if (!confirm(`Reset two-factor for "${user.username}"?\n\nThey will sign in with their password alone until they enrol again.`)) {
+        return;
+      }
+      try {
+        await api(`/api/users/${encodeURIComponent(user.id)}/reset-mfa`, { method: "POST", body: "{}" });
+        await refreshUsers();
+        setStatus(`Two-factor reset for ${user.username}.`);
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    });
+    wrap.appendChild(resetBtn2);
+
+    if (user.id !== currentUser?.id) {
+      const del = document.createElement("button");
+      del.className = "ghost-danger small";
+      del.textContent = "Delete";
+      del.addEventListener("click", async () => {
+        if (!confirm(`Delete the account "${user.username}"?\n\nThis cannot be undone. Their entries stay in the change log.`)) {
+          return;
+        }
+        try {
+          await api(`/api/users/${encodeURIComponent(user.id)}`, { method: "DELETE" });
+          await refreshUsers();
+          setStatus(`Deleted ${user.username}.`);
+        } catch (error) {
+          setStatus(error.message, true);
+        }
+      });
+      wrap.appendChild(del);
+    }
+
+    actions.appendChild(wrap);
+    tr.appendChild(actions);
+    tbody.appendChild(tr);
+  }
+
+  table.appendChild(tbody);
+  usersResultsEl.appendChild(table);
+}
+
+document.getElementById("add-user-btn").addEventListener("click", async () => {
+  const username = document.getElementById("new-username").value.trim();
+  const password = document.getElementById("new-password").value;
+  const role = document.getElementById("new-role").value;
+
+  try {
+    await api("/api/users", { method: "POST", body: JSON.stringify({ username, password, role }) });
+    document.getElementById("new-username").value = "";
+    document.getElementById("new-password").value = "";
+    await refreshUsers();
+    setStatus(`Added ${username}. They should enrol two-factor at first sign-in.`);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+/** Loads everything the signed-in app needs. */
+async function onSignedIn() {
+  hideAuthOverlay();
+  renderAccountPanel();
 
   try {
     await refreshServers();
@@ -1358,14 +1797,23 @@ saveTemplateBtn.addEventListener("click", async () => {
       setConnectionCollapsed(false);
     }
   } catch (_) {
-    // Ignore startup status errors.
+    // Ignore load errors; individual panels report their own failures.
   }
 
-  // Logs are independent of the connection, so load them even when disconnected.
   try {
     await refreshLogScopes();
   } catch (_) {
-    // Ignore log load errors at startup.
+    // Logs are non-critical at startup.
+  }
+}
+
+(async function init() {
+  applyTheme(localStorage.getItem("pbx-theme") || "light");
+
+  // Nothing loads until we know who (if anyone) is signed in.
+  const signedIn = await refreshIdentity();
+  if (signedIn) {
+    await onSignedIn();
   }
 })();
 

@@ -20,6 +20,14 @@ services:
       # DEFAULT_TEMPLATE_PATH: /data/default-template.xml
       TZ: ${TZ:-UTC}
 
+      # Set true once TLS terminates in front of this, so the session cookie is Secure.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+
+      # Only enable with an auth proxy in front that strips this header from client
+      # requests - otherwise anyone reaching the port can impersonate any user.
+      # TRUST_PROXY_AUTH: "true"
+      # PROXY_USER_HEADER: remote-user
+
     # Saved servers, templates and the change log persist here.
     volumes:
       - pbx-data:/data

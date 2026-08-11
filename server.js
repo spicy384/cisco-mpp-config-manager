@@ -1,4 +1,4 @@
-﻿const fs = require("fs");
+const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const SftpClient = require("ssh2-sftp-client");
@@ -42,6 +42,15 @@ const MAX_LOG_ENTRIES_PER_SCOPE = 2000;
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
+
+const { createAuth } = require("./auth-routes");
+const authGuard = createAuth({ dataDir: DATA_DIR, isProduction: process.env.NODE_ENV === "production" });
+
+// Auth endpoints are mounted first: they must be reachable while signed out.
+app.use(authGuard.router);
+
+// Everything else under /api requires a signed-in user.
+app.use("/api", authGuard.requireAuth);
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -176,10 +185,16 @@ function buildLogScope(conn) {
   };
 }
 
-function appendLogEntries(scope, entries) {
+/**
+ * `user` is stamped onto every entry here rather than at each construction site,
+ * so no code path can record a change without saying who made it.
+ */
+function appendLogEntries(scope, entries, user = "") {
   if (!scope || !Array.isArray(entries) || entries.length === 0) {
     return;
   }
+
+  const stamped = entries.map((entry) => ({ ...entry, user: entry.user || user || "" }));
 
   const log = loadChangeLog();
   const existing = log[scope.key];
@@ -190,7 +205,7 @@ function appendLogEntries(scope, entries) {
   bucket.host = scope.host;
   bucket.remoteDir = scope.remoteDir;
   bucket.profileId = scope.profileId;
-  bucket.entries = [...bucket.entries, ...entries].slice(-MAX_LOG_ENTRIES_PER_SCOPE);
+  bucket.entries = [...bucket.entries, ...stamped].slice(-MAX_LOG_ENTRIES_PER_SCOPE);
 
   log[scope.key] = bucket;
   saveChangeLog(log);
@@ -716,7 +731,7 @@ async function runBulkJob(job) {
         error: item.error || null
       }));
 
-    appendLogEntries(scope, logEntries);
+    appendLogEntries(scope, logEntries, job.request.user);
   }
 }
 
@@ -772,7 +787,9 @@ app.post("/api/bulk-edit", (req, res) => {
         mode: editMode,
         dryRun: isDryRun,
         remoteDir: connection.remoteDir,
-        scope: buildLogScope(connection)
+        scope: buildLogScope(connection),
+        // Captured now: the job outlives the request that started it.
+        user: req.user ? req.user.username : ""
       }
     };
 
@@ -1166,7 +1183,7 @@ app.post("/api/files/:name", async (req, res) => {
         }]
       : buildSaveLogEntries(fileName, diffEntriesForLog(previousEntries, entries), loggedStation);
 
-    appendLogEntries(buildLogScope(connection), logEntries);
+    appendLogEntries(buildLogScope(connection), logEntries, req.user ? req.user.username : "");
 
     res.json({ ok: true, message: `Saved ${fileName}`, fileName });
   } catch (error) {
@@ -1208,7 +1225,7 @@ app.post("/api/files", async (req, res) => {
       after: `${entries.length} field${entries.length === 1 ? "" : "s"}`,
       status: "changed",
       error: null
-    }]);
+    }], req.user ? req.user.username : "");
 
     res.json({ ok: true, message: `Created ${fileName}`, fileName });
   } catch (error) {
@@ -1249,6 +1266,21 @@ if (require.main === module) {
       ? `Default template: ${templatePath}`
       : "Default template: none found - 'Default Template' will be empty. "
         + "Set DEFAULT_TEMPLATE_PATH or place default-template.xml in the data directory.");
+
+    if (!authGuard.hasUsers()) {
+      console.log("Accounts: none yet - open the app to create the first administrator.");
+    } else {
+      console.log(`Accounts: ${authGuard.loadUsers().length} user(s) configured.`);
+    }
+
+    if (authGuard.trustProxyAuth) {
+      console.warn(
+        `\n  !! TRUST_PROXY_AUTH is ON. Anyone who can reach this port directly can\n`
+        + `     impersonate any user by sending the '${authGuard.proxyUserHeader}' header.\n`
+        + `     Only run this way when a reverse proxy in front strips that header from\n`
+        + `     client requests and sets it itself, and the app is not otherwise reachable.\n`
+      );
+    }
   });
 }
 

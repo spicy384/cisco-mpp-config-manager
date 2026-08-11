@@ -44,7 +44,7 @@ app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 const { createAuth } = require("./auth-routes");
-const authGuard = createAuth({ dataDir: DATA_DIR, isProduction: process.env.NODE_ENV === "production" });
+const authGuard = createAuth({ dataDir: DATA_DIR });
 
 // Auth endpoints are mounted first: they must be reachable while signed out.
 app.use(authGuard.router);
@@ -1272,6 +1272,10 @@ if (require.main === module) {
     } else {
       console.log(`Accounts: ${authGuard.loadUsers().length} user(s) configured.`);
     }
+
+    console.log(authGuard.cookieSecure
+      ? "Session cookie: Secure (expects HTTPS in front - sign-in will fail over plain HTTP)"
+      : "Session cookie: not Secure (fine on loopback; set COOKIE_SECURE=true behind HTTPS)");
 
     if (authGuard.trustProxyAuth) {
       console.warn(

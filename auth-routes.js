@@ -27,13 +27,18 @@ const LOCKOUT_MS = 15 * 60 * 1000;
 // Methods that change state require a CSRF token.
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
-function createAuth({ dataDir, isProduction = false }) {
+function createAuth({ dataDir }) {
   const USERS_FILE = path.join(dataDir, "users.json");
   const SESSIONS_FILE = path.join(dataDir, "sessions.json");
 
   // Optional: let a reverse proxy (Authelia, Authentik, oauth2-proxy) assert identity.
   const trustProxyAuth = String(process.env.TRUST_PROXY_AUTH || "").toLowerCase() === "true";
   const proxyUserHeader = String(process.env.PROXY_USER_HEADER || "remote-user").toLowerCase();
+
+  // Set this whenever HTTPS terminates in front of the app (a reverse proxy counts).
+  // Deliberately not tied to NODE_ENV: a flag that silently does nothing is worse
+  // than one that is simply off.
+  const cookieSecure = String(process.env.COOKIE_SECURE || "").toLowerCase() === "true";
 
   // Pending logins live in memory only: they are short-lived by design.
   const pendingLogins = new Map();
@@ -190,8 +195,8 @@ function createAuth({ dataDir, isProduction = false }) {
       "SameSite=Lax",
       `Max-Age=${Math.floor(ABSOLUTE_TIMEOUT_MS / 1000)}`
     ];
-    // Secure requires HTTPS; enabling it on plain HTTP would break sign-in entirely.
-    if (isProduction && String(process.env.COOKIE_SECURE || "").toLowerCase() === "true") {
+    // Secure requires HTTPS; setting it on plain HTTP would stop sign-in working at all.
+    if (cookieSecure) {
       attrs.push("Secure");
     }
     res.setHeader("Set-Cookie", attrs.join("; "));
@@ -637,6 +642,7 @@ function createAuth({ dataDir, isProduction = false }) {
     findUser,
     trustProxyAuth,
     proxyUserHeader,
+    cookieSecure,
     SESSION_COOKIE,
     CSRF_HEADER
   };

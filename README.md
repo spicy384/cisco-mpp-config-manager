@@ -206,7 +206,59 @@ their password alone and enrol again. If the *only* administrator is locked out,
 container, edit `users.json` in the data directory, set `"mfaEnrolled": false` and
 `"totpSecret": null` on that account, and start it again.
 
-### Behind a reverse proxy
+### Behind Nginx Proxy Manager
+Use NPM purely for TLS and hostname routing and let the app's own sign-in handle
+authentication. **Leave `TRUST_PROXY_AUTH` off** - that setting is only for proxies that
+authenticate *for* the app (see [Behind an authentication proxy](#behind-an-authentication-proxy)).
+
+The tidiest arrangement puts both containers on one Docker network so nothing is published
+on the host at all:
+
+1. Find the network NPM runs on (often `npm_default`):
+   ```bash
+   docker inspect <npm-container> --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}'
+   ```
+2. In `docker-compose.yml`, **delete the `ports:` block** and join that network:
+   ```yaml
+   services:
+     pbx-manager:
+       # ports:                      <- removed; only the proxy needs to reach it
+       networks:
+         - proxy
+   networks:
+     proxy:
+       name: npm_default             # whatever step 1 printed
+       external: true
+   ```
+3. Set `COOKIE_SECURE=true` so the session cookie is only sent over HTTPS:
+   ```yaml
+   environment:
+     COOKIE_SECURE: "true"
+   ```
+4. `docker compose up -d`
+5. In NPM add a Proxy Host:
+   - **Domain**: your hostname
+   - **Scheme**: `http`
+   - **Forward Hostname**: `pbx-manager` (the container name)
+   - **Forward Port**: `3000`
+   - **Block Common Exploits**: on
+   - **Websockets Support**: not needed; the app polls over plain HTTP
+   - **SSL tab**: request a certificate and turn on **Force SSL** and **HTTP/2**
+
+The app does not read `X-Forwarded-*` headers, so no extra proxy configuration is required.
+Lockout is tracked per account rather than per IP, so it keeps working correctly even though
+every request now arrives from the proxy's address.
+
+If you would rather keep the host port instead of sharing a network, NPM must forward to the
+host rather than to `127.0.0.1` (which inside NPM's container means NPM itself). In that case
+change the mapping to your LAN IP and forward to that - but the hop from NPM to the app is
+then unencrypted, so only do it on a network you trust.
+
+> **Check the startup log after switching.** It prints `Session cookie: Secure ...` once
+> `COOKIE_SECURE=true` is in effect. If you set that flag while still serving plain HTTP,
+> sign-in will silently fail - the browser accepts the cookie but never sends it back.
+
+### Behind an authentication proxy
 If you would rather have Authelia, Authentik or oauth2-proxy handle sign-in, set:
 
 ```

@@ -8,10 +8,11 @@ services:
     # The app requires a sign-in (per-user accounts, optional TOTP two-factor), but it
     # serves plain HTTP. Over anything but loopback that puts passwords and session
     # cookies on the wire in the clear, so it is published to loopback only.
-    # To reach it from another machine, either tunnel to it
-    # (ssh -L 3000:127.0.0.1:3000 you@this-host) or put a TLS-terminating reverse proxy
-    # in front and set COOKIE_SECURE=true. Change this to "<lan-ip>:3000:3000" only if
-    # you accept unencrypted credentials on that network. See the README.
+    #
+    # Behind a reverse proxy (Nginx Proxy Manager, Caddy, Traefik) prefer putting both
+    # containers on a shared network and deleting this ports block entirely - the proxy
+    # reaches the app by container name and nothing is exposed on the host at all.
+    # See "Behind Nginx Proxy Manager" in the README.
     ports:
       - "127.0.0.1:3000:3000"
 
@@ -22,7 +23,8 @@ services:
       # DEFAULT_TEMPLATE_PATH: /data/default-template.xml
       TZ: ${TZ:-UTC}
 
-      # Set true once TLS terminates in front of this, so the session cookie is Secure.
+      # Set true once HTTPS terminates in front of this, so the session cookie is marked
+      # Secure. Leave false on plain HTTP or sign-in will not work at all.
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
 
       # Only enable with an auth proxy in front that strips this header from client

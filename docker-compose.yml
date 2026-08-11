@@ -5,11 +5,13 @@ services:
     container_name: pbx-manager
     restart: unless-stopped
 
-    # IMPORTANT: this app has no login of its own. Anyone who can reach this port
-    # can read your saved server profiles and change log, and can push config to
-    # every phone on the PBX. It is therefore bound to loopback only.
-    # To reach it from elsewhere, put it behind a reverse proxy that authenticates
-    # (see README), or change this to "<lan-ip>:3000:3000" if the network is trusted.
+    # The app requires a sign-in (per-user accounts, optional TOTP two-factor), but it
+    # serves plain HTTP. Over anything but loopback that puts passwords and session
+    # cookies on the wire in the clear, so it is published to loopback only.
+    # To reach it from another machine, either tunnel to it
+    # (ssh -L 3000:127.0.0.1:3000 you@this-host) or put a TLS-terminating reverse proxy
+    # in front and set COOKIE_SECURE=true. Change this to "<lan-ip>:3000:3000" only if
+    # you accept unencrypted credentials on that network. See the README.
     ports:
       - "127.0.0.1:3000:3000"
 
@@ -28,7 +30,8 @@ services:
       # TRUST_PROXY_AUTH: "true"
       # PROXY_USER_HEADER: remote-user
 
-    # Saved servers, templates and the change log persist here.
+    # User accounts, sessions, saved servers, templates and the change log persist here.
+    # Treat it as sensitive: it holds password hashes and TOTP secrets.
     volumes:
       - pbx-data:/data
 

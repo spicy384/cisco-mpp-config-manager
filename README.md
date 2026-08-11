@@ -128,16 +128,18 @@ The built-in "Default Template" is read from the first of these that exists:
 
 1. `DEFAULT_TEMPLATE_PATH` environment variable
 2. `default-template.xml` inside the data directory (i.e. `/data/default-template.xml`)
-3. the original local Windows path, so existing non-Docker installs keep working
+3. `examples/default-template.xml`, the placeholder shipped with the app
 
-If none exist the template loads **empty** - creating a config from it would produce an empty
-file. The container logs which one it resolved at startup, so check `docker compose logs` if
-"Default Template" looks wrong. To supply one:
+So a fresh install always has a working template, but it is a **placeholder** - see
+[Example template](#example-template) below. Supply your own with:
 
 ```bash
-docker cp spaTemplate.xml pbx-manager:/data/default-template.xml
+docker cp your-template.xml pbx-manager:/data/default-template.xml
 docker compose restart
 ```
+
+The container logs which template it resolved at startup, so check `docker compose logs` if
+"Default Template" looks wrong.
 
 ### Environment variables
 | Variable | Default | Purpose |
@@ -152,6 +154,24 @@ docker compose restart
 docker compose up -d --build
 ```
 The volume is untouched by a rebuild, so your servers and change log carry over.
+
+## Example template
+`examples/default-template.xml` is a complete 441-field Cisco MPP `flat-profile` config used
+as the fallback "Default Template". Every value in it is a **placeholder**:
+
+| Field | Placeholder |
+|---|---|
+| `Admin_Passwd`, `Admin_Password`, `Password_1_` | `12345` |
+| `Proxy_1_`, `Profile_Rule`, `Picture_Download_URL` | `192.168.1.10` |
+| `Station_Display_Name` | `Reception - 1001` |
+
+> **Change these before provisioning any real phone.** Loading this template and creating a
+> config would set the phone's admin password to `12345` and point it at a proxy that almost
+> certainly is not yours. It exists so the editor opens with a realistic field set, not as a
+> deployable config.
+
+To make your own the default, drop it at `data/default-template.xml` (that directory is
+gitignored) or point `DEFAULT_TEMPLATE_PATH` at it. Either takes precedence over the example.
 
 ## Tests
 ```powershell

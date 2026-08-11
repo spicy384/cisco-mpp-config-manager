@@ -18,6 +18,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY server.js ./
 COPY public ./public
+# Bundled placeholder template; a real one mounted at /data takes precedence.
+COPY examples ./examples
 
 # The image ships no data; /data is a volume that outlives the container.
 # node:alpine already provides an unprivileged `node` user (uid 1000).

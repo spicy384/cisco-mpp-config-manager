@@ -17,12 +17,14 @@ const CHANGE_LOG_FILE = path.join(DATA_DIR, "change-log.json");
 /**
  * Where the built-in "Default Template" is read from, tried in order:
  *   1. DEFAULT_TEMPLATE_PATH env var
- *   2. default-template.xml inside the data directory
- * Returns null when neither exists, which surfaces as an empty default template.
+ *   2. default-template.xml inside the data directory (your real template)
+ *   3. the bundled example, so a fresh install has something usable
+ * Returns null only if even the example is missing.
  */
 const DEFAULT_TEMPLATE_CANDIDATES = [
   process.env.DEFAULT_TEMPLATE_PATH,
-  path.join(DATA_DIR, "default-template.xml")
+  path.join(DATA_DIR, "default-template.xml"),
+  path.join(__dirname, "examples", "default-template.xml")
 ].filter(Boolean);
 
 function resolveDefaultTemplatePath() {

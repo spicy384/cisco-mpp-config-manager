@@ -1,0 +1,443 @@
+<flat-profile>
+  <Transport_Protocol ua="na">tftp</Transport_Protocol>
+  <Profile_Rule ua="na">tftp://192.168.1.10/spa$MA.xml</Profile_Rule>
+  <Attendant_Console_Call_Pickup_Code ua="na">**#</Attendant_Console_Call_Pickup_Code>
+  <Call_Pickup_Code ua="na">**#</Call_Pickup_Code>
+  <Admin_Passwd ua="rw">12345</Admin_Passwd>
+  <Ans_Call_Without_Reg_1_ ua="na">No</Ans_Call_Without_Reg_1_>
+  <Ans_Call_Without_Reg_2_ ua="na">No</Ans_Call_Without_Reg_2_>
+  <Ans_Call_Without_Reg_3_ ua="na">No</Ans_Call_Without_Reg_3_>
+  <Ans_Call_Without_Reg_4_ ua="na">No</Ans_Call_Without_Reg_4_>
+  <Ans_Call_Without_Reg_5_ ua="na">No</Ans_Call_Without_Reg_5_>
+  <Ans_Call_Without_Reg_6_ ua="na">No</Ans_Call_Without_Reg_6_>
+  <Ans_Call_Without_Reg_7_ ua="na">No</Ans_Call_Without_Reg_7_>
+  <Ans_Call_Without_Reg_8_ ua="na">No</Ans_Call_Without_Reg_8_>
+  <Ans_Call_Without_Reg_9_ ua="na">No</Ans_Call_Without_Reg_9_>
+  <Ans_Call_Without_Reg_10_ ua="na">No</Ans_Call_Without_Reg_10_>
+  <Ans_Call_Without_Reg_11_ ua="na">No</Ans_Call_Without_Reg_11_>
+  <Ans_Call_Without_Reg_12_ ua="na">No</Ans_Call_Without_Reg_12_>
+  <Ans_Call_Without_Reg_13_ ua="na">No</Ans_Call_Without_Reg_13_>
+  <Ans_Call_Without_Reg_14_ ua="na">No</Ans_Call_Without_Reg_14_>
+  <Ans_Call_Without_Reg_15_ ua="na">No</Ans_Call_Without_Reg_15_>
+  <Ans_Call_Without_Reg_16_ ua="na">No</Ans_Call_Without_Reg_16_>
+  <Call_Pickup_Audio_Notification ua="na">no</Call_Pickup_Audio_Notification>
+  <Date_Format>month/day</Date_Format>
+  <Daylight_Saving_Time_Rule ua="na">start=3/8/7/02:0:0;end=11/1/7/02:0:0;save=1</Daylight_Saving_Time_Rule>
+  <Debug_Server ua="na"></Debug_Server>
+  <Debug_Level ua="na">0</Debug_Level>
+  <Dial_Plan_1_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_1_>
+  <Dial_Plan_2_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_2_>
+  <Dial_Plan_3_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_3_>
+  <Dial_Plan_4_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_4_>
+  <Dial_Plan_5_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_5_>
+  <Dial_Plan_6_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_6_>
+  <Dial_Plan_7_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_7_>
+  <Dial_Plan_8_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_8_>
+  <Dial_Plan_9_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_9_>
+  <Dial_Plan_10_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_10_>
+  <Dial_Plan_11_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_11_>
+  <Dial_Plan_12_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_12_>
+  <Dial_Plan_13_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_13_>
+  <Dial_Plan_14_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_14_>
+  <Dial_Plan_15_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_15_>
+  <Dial_Plan_16_ ua="na">(*x.|**xx|[3469]11|0|00|[2-9]xxxxxx|1xxx[2-9]xxxxxxS0|xxxxxxxxxxxx.)</Dial_Plan_16_>
+  <Display_Name_1_ ua="na">Reception</Display_Name_1_>
+  <Display_Name_2_ ua="na"></Display_Name_2_>
+  <Display_Name_3_ ua="na"></Display_Name_3_>
+  <Display_Name_4_ ua="na"></Display_Name_4_>
+  <Display_Name_5_ ua="na"></Display_Name_5_>
+  <Display_Name_6_ ua="na"></Display_Name_6_>
+  <Display_Name_7_ ua="na"></Display_Name_7_>
+  <Display_Name_8_ ua="na"></Display_Name_8_>
+  <Display_Name_9_ ua="na"></Display_Name_9_>
+  <Display_Name_10_ ua="na"></Display_Name_10_>
+  <Display_Name_11_ ua="na"></Display_Name_11_>
+  <Display_Name_12_ ua="na"></Display_Name_12_>
+  <Display_Name_13_ ua="na"></Display_Name_13_>
+  <Display_Name_14_ ua="na"></Display_Name_14_>
+  <Display_Name_15_ ua="na"></Display_Name_15_>
+  <Display_Name_16_ ua="na"></Display_Name_16_>
+  <Downgrade_Rev_Limit ua="na"></Downgrade_Rev_Limit>
+  <Enable_Web_Admin_Access ua="na">Yes</Enable_Web_Admin_Access>
+  <Enable_Web_Server ua="na">Yes</Enable_Web_Server>
+  <Extended_Function_1_></Extended_Function_1_>
+  <Extended_Function_2_></Extended_Function_2_>
+  <Extended_Function_3_></Extended_Function_3_>
+  <Extended_Function_4_></Extended_Function_4_>
+  <Extended_Function_5_></Extended_Function_5_>
+  <Extended_Function_6_>fnc=sd;ext=1002@192.168.1.10:5060;nme=Support</Extended_Function_6_>
+  <Extended_Function_7_>fnc=sd;ext=1003@192.168.1.10:5060;nme=Helpdesk</Extended_Function_7_>
+  <Extended_Function_8_>fnc=sd;ext=1004@192.168.1.10:5060;nme=Front Desk</Extended_Function_8_>
+  <Extended_Function_9_></Extended_Function_9_>
+  <Extended_Function_10_></Extended_Function_10_>
+  <Extended_Function_11_></Extended_Function_11_>
+  <Extended_Function_12_></Extended_Function_12_>
+  <Extended_Function_13_></Extended_Function_13_>
+  <Extended_Function_14_></Extended_Function_14_>
+  <Extended_Function_15_></Extended_Function_15_>
+  <Extended_Function_16_></Extended_Function_16_>
+  <Extension_1_>1</Extension_1_>
+  <Extension_2_>Disabled</Extension_2_>
+  <Extension_3_></Extension_3_>
+  <Extension_4_></Extension_4_>
+  <Extension_5_></Extension_5_>
+  <Extension_6_>Disabled</Extension_6_>
+  <Extension_7_>Disabled</Extension_7_>
+  <Extension_8_>Disabled</Extension_8_>
+  <Extension_9_></Extension_9_>
+  <Extension_10_></Extension_10_>
+  <Extension_11_></Extension_11_>
+  <Extension_12_></Extension_12_>
+  <Extension_13_></Extension_13_>
+  <Extension_14_></Extension_14_>
+  <Extension_15_></Extension_15_>
+  <Extension_16_></Extension_16_>
+  <Log_Resync_Request_Msg ua="na">$PN $MAC -- Requesting resync $SCHEME://$SERVIP:$PORT$PATH</Log_Resync_Request_Msg>
+  <Log_Resync_Success_Msg ua="na">$PN $MAC -- Successful resync $SCHEME://$SERVIP:$PORT$PATH</Log_Resync_Success_Msg>
+  <Log_Resync_Failure_Msg ua="na">$PN $MAC -- Resync failed: $ERR</Log_Resync_Failure_Msg>
+  <Log_Upgrade_Request_Msg ua="na">$PN $MAC -- Requesting upgrade $SCHEME://$SERVIP:$PORT$PATH</Log_Upgrade_Request_Msg>
+  <Log_Upgrade_Success_Msg ua="na">$PN $MAC -- Successful upgrade $SCHEME://$SERVIP:$PORT$PATH -- $ERR</Log_Upgrade_Success_Msg>
+  <Log_Upgrade_Failure_Msg ua="na">$PN $MAC -- Upgrade failed: $ERR</Log_Upgrade_Failure_Msg>
+  <Outbound_Proxy_1_ ua="na"></Outbound_Proxy_1_>
+  <Outbound_Proxy_2_ ua="na"></Outbound_Proxy_2_>
+  <Outbound_Proxy_3_ ua="na"></Outbound_Proxy_3_>
+  <Outbound_Proxy_4_ ua="na"></Outbound_Proxy_4_>
+  <Outbound_Proxy_5_ ua="na"></Outbound_Proxy_5_>
+  <Outbound_Proxy_6_ ua="na"></Outbound_Proxy_6_>
+  <Outbound_Proxy_7_ ua="na"></Outbound_Proxy_7_>
+  <Outbound_Proxy_8_ ua="na"></Outbound_Proxy_8_>
+  <Outbound_Proxy_9_ ua="na"></Outbound_Proxy_9_>
+  <Outbound_Proxy_10_ ua="na"></Outbound_Proxy_10_>
+  <Outbound_Proxy_11_ ua="na"></Outbound_Proxy_11_>
+  <Outbound_Proxy_12_ ua="na"></Outbound_Proxy_12_>
+  <Outbound_Proxy_13_ ua="na"></Outbound_Proxy_13_>
+  <Outbound_Proxy_14_ ua="na"></Outbound_Proxy_14_>
+  <Outbound_Proxy_15_ ua="na"></Outbound_Proxy_15_>
+  <Outbound_Proxy_16_ ua="na"></Outbound_Proxy_16_>
+  <Password_1_ ua="na">12345</Password_1_>
+  <Password_2_ ua="na"></Password_2_>
+  <Password_3_ ua="na"></Password_3_>
+  <Password_4_ ua="na"></Password_4_>
+  <Password_5_ ua="na"></Password_5_>
+  <Password_6_ ua="na"></Password_6_>
+  <Password_7_ ua="na"></Password_7_>
+  <Password_8_ ua="na"></Password_8_>
+  <Password_9_ ua="na"></Password_9_>
+  <Password_10_ ua="na"></Password_10_>
+  <Password_11_ ua="na"></Password_11_>
+  <Password_12_ ua="na"></Password_12_>
+  <Password_13_ ua="na"></Password_13_>
+  <Password_14_ ua="na"></Password_14_>
+  <Password_15_ ua="na"></Password_15_>
+  <Password_16_ ua="na"></Password_16_>
+  <Primary_NTP_Server ua="na">0.us.pool.ntp.org</Primary_NTP_Server>
+  <Proxy_1_ ua="na">192.168.1.10:5060</Proxy_1_>
+  <Proxy_2_ ua="na"></Proxy_2_>
+  <Proxy_3_ ua="na"></Proxy_3_>
+  <Proxy_4_ ua="na"></Proxy_4_>
+  <Proxy_5_ ua="na"></Proxy_5_>
+  <Proxy_6_ ua="na"></Proxy_6_>
+  <Proxy_7_ ua="na"></Proxy_7_>
+  <Proxy_8_ ua="na"></Proxy_8_>
+  <Proxy_9_ ua="na"></Proxy_9_>
+  <Proxy_10_ ua="na"></Proxy_10_>
+  <Proxy_11_ ua="na"></Proxy_11_>
+  <Proxy_12_ ua="na"></Proxy_12_>
+  <Proxy_13_ ua="na"></Proxy_13_>
+  <Proxy_14_ ua="na"></Proxy_14_>
+  <Proxy_15_ ua="na"></Proxy_15_>
+  <Proxy_16_ ua="na"></Proxy_16_>
+  <Register_Expires_1_ ua="na">60</Register_Expires_1_>
+  <Register_Expires_2_ ua="na">60</Register_Expires_2_>
+  <Register_Expires_3_ ua="na">60</Register_Expires_3_>
+  <Register_Expires_4_ ua="na">60</Register_Expires_4_>
+  <Register_Expires_5_ ua="na">60</Register_Expires_5_>
+  <Register_Expires_6_ ua="na">60</Register_Expires_6_>
+  <Register_Expires_7_ ua="na">60</Register_Expires_7_>
+  <Register_Expires_8_ ua="na">60</Register_Expires_8_>
+  <Register_Expires_9_ ua="na">60</Register_Expires_9_>
+  <Register_Expires_10_ ua="na">60</Register_Expires_10_>
+  <Register_Expires_11_ ua="na">60</Register_Expires_11_>
+  <Register_Expires_12_ ua="na">60</Register_Expires_12_>
+  <Register_Expires_13_ ua="na">60</Register_Expires_13_>
+  <Register_Expires_14_ ua="na">60</Register_Expires_14_>
+  <Register_Expires_15_ ua="na">60</Register_Expires_15_>
+  <Register_Expires_16_ ua="na">60</Register_Expires_16_>
+  <Resync_On_Reset ua="na">Yes</Resync_On_Reset>
+  <Resync_Periodic ua="na">3600</Resync_Periodic>
+  <Resync_Error_Retry_Delay ua="na">3600</Resync_Error_Retry_Delay>
+  <Secondary_NTP_Server ua="na"></Secondary_NTP_Server>
+  <Server_Type>Asterisk</Server_Type>
+  <Share_Call_Appearance_1_>shared</Share_Call_Appearance_1_>
+  <Share_Call_Appearance_2_>private</Share_Call_Appearance_2_>
+  <Share_Call_Appearance_3_></Share_Call_Appearance_3_>
+  <Share_Call_Appearance_4_></Share_Call_Appearance_4_>
+  <Share_Call_Appearance_5_></Share_Call_Appearance_5_>
+  <Share_Call_Appearance_6_></Share_Call_Appearance_6_>
+  <Share_Call_Appearance_7_></Share_Call_Appearance_7_>
+  <Share_Call_Appearance_8_></Share_Call_Appearance_8_>
+  <Share_Call_Appearance_9_></Share_Call_Appearance_9_>
+  <Share_Call_Appearance_10_></Share_Call_Appearance_10_>
+  <Share_Call_Appearance_11_></Share_Call_Appearance_11_>
+  <Share_Call_Appearance_12_></Share_Call_Appearance_12_>
+  <Share_Call_Appearance_13_></Share_Call_Appearance_13_>
+  <Share_Call_Appearance_14_></Share_Call_Appearance_14_>
+  <Share_Call_Appearance_15_></Share_Call_Appearance_15_>
+  <Share_Call_Appearance_16_></Share_Call_Appearance_16_>
+  <Short_Name_1_ ua="na">1001</Short_Name_1_>
+  <Short_Name_2_ ua="na"></Short_Name_2_>
+  <Short_Name_3_ ua="na"></Short_Name_3_>
+  <Short_Name_4_ ua="na"></Short_Name_4_>
+  <Short_Name_5_ ua="na"></Short_Name_5_>
+  <Short_Name_6_ ua="na"></Short_Name_6_>
+  <Short_Name_7_ ua="na"></Short_Name_7_>
+  <Short_Name_8_ ua="na"></Short_Name_8_>
+  <Short_Name_9_ ua="na"></Short_Name_9_>
+  <Short_Name_10_ ua="na"></Short_Name_10_>
+  <Short_Name_11_ ua="na"></Short_Name_11_>
+  <Short_Name_12_ ua="na"></Short_Name_12_>
+  <Short_Name_13_ ua="na"></Short_Name_13_>
+  <Short_Name_14_ ua="na"></Short_Name_14_>
+  <Short_Name_15_ ua="na"></Short_Name_15_>
+  <Short_Name_16_ ua="na"></Short_Name_16_>
+  <Station_Display_Name ua="na">Reception - 1001</Station_Display_Name>
+  <SIP_Port_1_ ua="na">5060</SIP_Port_1_>
+  <SIP_Port_2_ ua="na">5070</SIP_Port_2_>
+  <SIP_Port_3_ ua="na">5080</SIP_Port_3_>
+  <SIP_Port_4_ ua="na">5090</SIP_Port_4_>
+  <SIP_Port_5_ ua="na">5100</SIP_Port_5_>
+  <SIP_Port_6_ ua="na">5110</SIP_Port_6_>
+  <SIP_Port_7_ ua="na">5120</SIP_Port_7_>
+  <SIP_Port_8_ ua="na">5130</SIP_Port_8_>
+  <SIP_Port_9_ ua="na">5140</SIP_Port_9_>
+  <SIP_Port_10_ ua="na">5150</SIP_Port_10_>
+  <SIP_Port_11_ ua="na">5160</SIP_Port_11_>
+  <SIP_Port_12_ ua="na">5170</SIP_Port_12_>
+  <SIP_Port_13_ ua="na">5180</SIP_Port_13_>
+  <SIP_Port_14_ ua="na">5190</SIP_Port_14_>
+  <SIP_Port_15_ ua="na">5200</SIP_Port_15_>
+  <SIP_Port_16_ ua="na">5210</SIP_Port_16_>
+  <Speed_Dial_1 ua="rw"></Speed_Dial_1>
+  <Speed_Dial_2 ua="rw"></Speed_Dial_2>
+  <Speed_Dial_3 ua="rw"></Speed_Dial_3>
+  <Speed_Dial_4 ua="rw"></Speed_Dial_4>
+  <Speed_Dial_5 ua="rw"></Speed_Dial_5>
+  <Speed_Dial_6 ua="rw"></Speed_Dial_6>
+  <Speed_Dial_7 ua="rw"></Speed_Dial_7>
+  <Speed_Dial_8 ua="rw"></Speed_Dial_8>
+  <Speed_Dial_9 ua="rw"></Speed_Dial_9>
+  <Syslog_Server ua="na"></Syslog_Server>
+  <Time_Zone ua="na">GMT-05:00</Time_Zone>
+  <Upgrade_Enable ua="na">Yes</Upgrade_Enable>
+  <Upgrade_Error_Retry_Delay ua="na">3600</Upgrade_Error_Retry_Delay>
+  <Upgrade_Rule ua="na"></Upgrade_Rule>
+  <User_Password ua="rw"></User_Password>
+  <Admin_Password ua="na">12345</Admin_Password>
+  <User_ID_1_ ua="na">1001</User_ID_1_>
+  <User_ID_2_ ua="na"></User_ID_2_>
+  <User_ID_3_ ua="na"></User_ID_3_>
+  <User_ID_4_ ua="na"></User_ID_4_>
+  <User_ID_5_ ua="na"></User_ID_5_>
+  <User_ID_6_ ua="na"></User_ID_6_>
+  <User_ID_7_ ua="na"></User_ID_7_>
+  <User_ID_8_ ua="na"></User_ID_8_>
+  <User_ID_9_ ua="na"></User_ID_9_>
+  <User_ID_10_ ua="na"></User_ID_10_>
+  <User_ID_11_ ua="na"></User_ID_11_>
+  <User_ID_12_ ua="na"></User_ID_12_>
+  <User_ID_13_ ua="na"></User_ID_13_>
+  <User_ID_14_ ua="na"></User_ID_14_>
+  <User_ID_15_ ua="na"></User_ID_15_>
+  <User_ID_16_ ua="na"></User_ID_16_>
+  <Use_DNS_SRV_1_ ua="na">Yes</Use_DNS_SRV_1_>
+  <Use_DNS_SRV_2_ ua="na">Yes</Use_DNS_SRV_2_>
+  <Use_DNS_SRV_3_ ua="na">Yes</Use_DNS_SRV_3_>
+  <Use_DNS_SRV_4_ ua="na">Yes</Use_DNS_SRV_4_>
+  <Use_DNS_SRV_5_ ua="na">Yes</Use_DNS_SRV_5_>
+  <Use_DNS_SRV_6_ ua="na">Yes</Use_DNS_SRV_6_>
+  <Use_DNS_SRV_7_ ua="na">Yes</Use_DNS_SRV_7_>
+  <Use_DNS_SRV_8_ ua="na">Yes</Use_DNS_SRV_8_>
+  <Use_DNS_SRV_9_ ua="na">Yes</Use_DNS_SRV_9_>
+  <Use_DNS_SRV_10_ ua="na">Yes</Use_DNS_SRV_10_>
+  <Use_DNS_SRV_11_ ua="na">Yes</Use_DNS_SRV_11_>
+  <Use_DNS_SRV_12_ ua="na">Yes</Use_DNS_SRV_12_>
+  <Use_DNS_SRV_13_ ua="na">Yes</Use_DNS_SRV_13_>
+  <Use_DNS_SRV_14_ ua="na">Yes</Use_DNS_SRV_14_>
+  <Use_DNS_SRV_15_ ua="na">Yes</Use_DNS_SRV_15_>
+  <Use_DNS_SRV_16_ ua="na">Yes</Use_DNS_SRV_16_>
+  <Use_Outbound_Proxy_1_ ua="na">No</Use_Outbound_Proxy_1_>
+  <Use_Outbound_Proxy_2_ ua="na">No</Use_Outbound_Proxy_2_>
+  <Use_Outbound_Proxy_3_ ua="na">No</Use_Outbound_Proxy_3_>
+  <Use_Outbound_Proxy_4_ ua="na">No</Use_Outbound_Proxy_4_>
+  <Use_Outbound_Proxy_5_ ua="na">No</Use_Outbound_Proxy_5_>
+  <Use_Outbound_Proxy_6_ ua="na">No</Use_Outbound_Proxy_6_>
+  <Use_Outbound_Proxy_7_ ua="na">No</Use_Outbound_Proxy_7_>
+  <Use_Outbound_Proxy_8_ ua="na">No</Use_Outbound_Proxy_8_>
+  <Use_Outbound_Proxy_9_ ua="na">No</Use_Outbound_Proxy_9_>
+  <Use_Outbound_Proxy_10_ ua="na">No</Use_Outbound_Proxy_10_>
+  <Use_Outbound_Proxy_11_ ua="na">No</Use_Outbound_Proxy_11_>
+  <Use_Outbound_Proxy_12_ ua="na">No</Use_Outbound_Proxy_12_>
+  <Use_Outbound_Proxy_13_ ua="na">No</Use_Outbound_Proxy_13_>
+  <Use_Outbound_Proxy_14_ ua="na">No</Use_Outbound_Proxy_14_>
+  <Use_Outbound_Proxy_15_ ua="na">No</Use_Outbound_Proxy_15_>
+  <Use_Outbound_Proxy_16_ ua="na">No</Use_Outbound_Proxy_16_>
+  <Voice_Mail_Number ua="na">*97</Voice_Mail_Number>
+  <Web_Server_Port ua="na">443</Web_Server_Port>
+  <Programmable_Softkey_Enable ua="na">yes</Programmable_Softkey_Enable>
+  <Idle_Key_List ua="na">redial;cfwd;dnd;recents;</Idle_Key_List>
+  <Missed_Call_Key_List ua="na">lcr|1;miss|4;</Missed_Call_Key_List>
+  <Off_Hook_Key_List ua="na">redial;cfwd;dnd;recents;</Off_Hook_Key_List>
+  <Dialing_Input_Key_List ua="na">option|1;dial|2;delchar|3;cancel|4;clear</Dialing_Input_Key_List>
+  <Progressing_Key_List ua="na">endcall|2;</Progressing_Key_List>
+  <Connected_Key_List ua="na">hold|1;endcall|2;conf|3;xfer|4;crdstart;crdstop;bxfer;confLx;xferLx;park;phold;flash;</Connected_Key_List>
+  <Start-Xfer_Key_List ua="na">hold|1;endcall|2;xfer|4;crdstart;crdstop;</Start-Xfer_Key_List>
+  <Start-Conf_Key_List ua="na">hold|1;endcall|2;conf|3;crdstart;crdstop;</Start-Conf_Key_List>
+  <Conferencing_Key_List ua="na">hold|1;endcall|2;join|4;crdstart;crdstop;</Conferencing_Key_List>
+  <Releasing_Key_List ua="na">endcall|2;</Releasing_Key_List>
+  <Hold_Key_List ua="na">resume|1;endcall|2;newcall|3;redial;dir;cfwd;dnd;crdstart;crdstop;</Hold_Key_List>
+  <Ringing_Key_List ua="na">answer|1;ignore|2;</Ringing_Key_List>
+  <Shared_Active_Key_List ua="na">newcall|1;barge|2;cfwd|3;dnd|4;crdstart;crdstop;</Shared_Active_Key_List>
+  <Shared_Held_Key_List ua="na">resume|1;barge|2;cfwd|3;dnd|4;crdstart;crdstop;</Shared_Held_Key_List>
+  <PSK_1 ua="na"></PSK_1>
+  <PSK_2 ua="na"></PSK_2>
+  <PSK_3 ua="na"></PSK_3>
+  <PSK_4 ua="na"></PSK_4>
+  <PSK_5 ua="na"></PSK_5>
+  <PSK_6 ua="na"></PSK_6>
+  <PSK_7 ua="na"></PSK_7>
+  <PSK_8 ua="na"></PSK_8>
+  <PSK_9 ua="na"></PSK_9>
+  <PSK_10 ua="na"></PSK_10>
+  <PSK_11 ua="na"></PSK_11>
+  <PSK_12 ua="na"></PSK_12>
+  <PSK_13 ua="na"></PSK_13>
+  <PSK_14 ua="na"></PSK_14>
+  <PSK_15 ua="na"></PSK_15>
+  <PSK_16 ua="na"></PSK_16>
+  <BXfer_On_Speed_Dial_Enable ua="na">Yes</BXfer_On_Speed_Dial_Enable>
+  <Phone_Background ua="na">Download Picture</Phone_Background>
+  <Picture_Download_URL ua="rw">tftp://192.168.1.10/images/wallpaper.png</Picture_Download_URL>
+  <Call_Return_Code ua="na"></Call_Return_Code>
+  <Call_Redial_Code ua="na"></Call_Redial_Code>
+  <Blind_Transfer_Code ua="na"></Blind_Transfer_Code>
+  <Call_Back_Act_Code ua="na"></Call_Back_Act_Code>
+  <Call_Back_Deact_Code ua="na"></Call_Back_Deact_Code>
+  <Call_Back_Busy_Act_Code ua="na"></Call_Back_Busy_Act_Code>
+  <Cfwd_All_Act_Code ua="na">*72</Cfwd_All_Act_Code>
+  <Cfwd_All_Deact_Code ua="na">*73</Cfwd_All_Deact_Code>
+  <Cfwd_Busy_Act_Code ua="na">*90</Cfwd_Busy_Act_Code>
+  <Cfwd_Busy_Deact_Code ua="na">*91</Cfwd_Busy_Deact_Code>
+  <Cfwd_No_Ans_Act_Code ua="na">*52</Cfwd_No_Ans_Act_Code>
+  <Cfwd_No_Ans_Deact_Code ua="na">*53</Cfwd_No_Ans_Deact_Code>
+  <Cfwd_Last_Act_Code ua="na"></Cfwd_Last_Act_Code>
+  <Cfwd_Last_Deact_Code ua="na"></Cfwd_Last_Deact_Code>
+  <Block_Last_Act_Code ua="na"></Block_Last_Act_Code>
+  <Block_Last_Deact_Code ua="na"></Block_Last_Deact_Code>
+  <Accept_Last_Act_Code ua="na"></Accept_Last_Act_Code>
+  <Accept_Last_Deact_Code ua="na"></Accept_Last_Deact_Code>
+  <CW_Act_Code ua="na"></CW_Act_Code>
+  <CW_Deact_Code ua="na"></CW_Deact_Code>
+  <CW_Per_Call_Act_Code ua="na"></CW_Per_Call_Act_Code>
+  <CW_Per_Call_Deact_Code ua="na"></CW_Per_Call_Deact_Code>
+  <Block_CID_Act_Code ua="na"></Block_CID_Act_Code>
+  <Block_CID_Deact_Code ua="na"></Block_CID_Deact_Code>
+  <Block_CID_Per_Call_Act_Code ua="na"></Block_CID_Per_Call_Act_Code>
+  <Block_CID_Per_Call_Deact_Code ua="na"></Block_CID_Per_Call_Deact_Code>
+  <Block_ANC_Act_Code ua="na"></Block_ANC_Act_Code>
+  <Block_ANC_Deact_Code ua="na"></Block_ANC_Deact_Code>
+  <DND_Act_Code ua="na"></DND_Act_Code>
+  <DND_Deact_Code ua="na"></DND_Deact_Code>
+  <CID_Act_Code ua="na"></CID_Act_Code>
+  <CID_Deact_Code ua="na"></CID_Deact_Code>
+  <CWCID_Act_Code ua="na"></CWCID_Act_Code>
+  <CWCID_Deact_Code ua="na"></CWCID_Deact_Code>
+  <Dist_Ring_Act_Code ua="na"></Dist_Ring_Act_Code>
+  <Dist_Ring_Deact_Code ua="na"></Dist_Ring_Deact_Code>
+  <Speed_Dial_Act_Code ua="na"></Speed_Dial_Act_Code>
+  <Paging_Code ua="na"></Paging_Code>
+  <Secure_All_Call_Act_Code ua="na"></Secure_All_Call_Act_Code>
+  <Secure_No_Call_Act_Code ua="na"></Secure_No_Call_Act_Code>
+  <Secure_One_Call_Act_Code ua="na"></Secure_One_Call_Act_Code>
+  <Secure_One_Call_Deact_Code ua="na"></Secure_One_Call_Deact_Code>
+  <Conference_Act_Code ua="na"></Conference_Act_Code>
+  <Attn-Xfer_Act_Code ua="na"></Attn-Xfer_Act_Code>
+  <Modem_Line_Toggle_Code ua="na"></Modem_Line_Toggle_Code>
+  <FAX_Line_Toggle_Code ua="na"></FAX_Line_Toggle_Code>
+  <Media_Loopback_Code ua="na"></Media_Loopback_Code>
+  <Referral_Services_Codes ua="na"></Referral_Services_Codes>
+  <Feature_Dial_Services_Codes ua="na"></Feature_Dial_Services_Codes>
+  <Service_Annc_Base_Number ua="na"></Service_Annc_Base_Number>
+  <Service_Annc_Extension_Codes ua="na"></Service_Annc_Extension_Codes>
+  <Unit_1_Key_1 ua="na"></Unit_1_Key_1>
+  <Unit_1_Key_2 ua="na"></Unit_1_Key_2>
+  <Unit_1_Key_3 ua="na"></Unit_1_Key_3>
+  <Unit_1_Key_4 ua="na"></Unit_1_Key_4>
+  <Unit_1_Key_5 ua="na"></Unit_1_Key_5>
+  <Unit_1_Key_6 ua="na"></Unit_1_Key_6>
+  <Unit_1_Key_7 ua="na"></Unit_1_Key_7>
+  <Unit_1_Key_8 ua="na"></Unit_1_Key_8>
+  <Unit_1_Key_9 ua="na"></Unit_1_Key_9>
+  <Unit_1_Key_10 ua="na"></Unit_1_Key_10>
+  <Unit_1_Key_11 ua="na"></Unit_1_Key_11>
+  <Unit_1_Key_12 ua="na"></Unit_1_Key_12>
+  <Unit_1_Key_13 ua="na"></Unit_1_Key_13>
+  <Unit_1_Key_14 ua="na"></Unit_1_Key_14>
+  <Unit_1_Key_15 ua="na"></Unit_1_Key_15>
+  <Unit_1_Key_16 ua="na"></Unit_1_Key_16>
+  <Unit_1_Key_17 ua="na"></Unit_1_Key_17>
+  <Unit_1_Key_18 ua="na"></Unit_1_Key_18>
+  <Unit_1_Key_19 ua="na"></Unit_1_Key_19>
+  <Unit_1_Key_20 ua="na"></Unit_1_Key_20>
+  <Unit_1_Key_21 ua="na"></Unit_1_Key_21>
+  <Unit_1_Key_22 ua="na"></Unit_1_Key_22>
+  <Unit_1_Key_23 ua="na"></Unit_1_Key_23>
+  <Unit_1_Key_24 ua="na"></Unit_1_Key_24>
+  <Unit_1_Key_25 ua="na"></Unit_1_Key_25>
+  <Unit_1_Key_26 ua="na"></Unit_1_Key_26>
+  <Unit_1_Key_27 ua="na"></Unit_1_Key_27>
+  <Unit_1_Key_28 ua="na"></Unit_1_Key_28>
+  <Unit_1_Key_29 ua="na"></Unit_1_Key_29>
+  <Unit_1_Key_30 ua="na"></Unit_1_Key_30>
+  <Unit_1_Key_31 ua="na"></Unit_1_Key_31>
+  <Unit_1_Key_32 ua="na"></Unit_1_Key_32>
+  <Unit_2_Key_1 ua="na"></Unit_2_Key_1>
+  <Unit_2_Key_2 ua="na"></Unit_2_Key_2>
+  <Unit_2_Key_3 ua="na"></Unit_2_Key_3>
+  <Unit_2_Key_4 ua="na"></Unit_2_Key_4>
+  <Unit_2_Key_5 ua="na"></Unit_2_Key_5>
+  <Unit_2_Key_6 ua="na"></Unit_2_Key_6>
+  <Unit_2_Key_7 ua="na"></Unit_2_Key_7>
+  <Unit_2_Key_8 ua="na"></Unit_2_Key_8>
+  <Unit_2_Key_9 ua="na"></Unit_2_Key_9>
+  <Unit_2_Key_10 ua="na"></Unit_2_Key_10>
+  <Unit_2_Key_11 ua="na"></Unit_2_Key_11>
+  <Unit_2_Key_12 ua="na"></Unit_2_Key_12>
+  <Unit_2_Key_13 ua="na"></Unit_2_Key_13>
+  <Unit_2_Key_14 ua="na"></Unit_2_Key_14>
+  <Unit_2_Key_15 ua="na"></Unit_2_Key_15>
+  <Unit_2_Key_16 ua="na"></Unit_2_Key_16>
+  <Unit_2_Key_17 ua="na"></Unit_2_Key_17>
+  <Unit_2_Key_18 ua="na"></Unit_2_Key_18>
+  <Unit_2_Key_19 ua="na"></Unit_2_Key_19>
+  <Unit_2_Key_20 ua="na"></Unit_2_Key_20>
+  <Unit_2_Key_21 ua="na"></Unit_2_Key_21>
+  <Unit_2_Key_22 ua="na"></Unit_2_Key_22>
+  <Unit_2_Key_23 ua="na"></Unit_2_Key_23>
+  <Unit_2_Key_24 ua="na"></Unit_2_Key_24>
+  <Unit_2_Key_25 ua="na"></Unit_2_Key_25>
+  <Unit_2_Key_26 ua="na"></Unit_2_Key_26>
+  <Unit_2_Key_27 ua="na"></Unit_2_Key_27>
+  <Unit_2_Key_28 ua="na"></Unit_2_Key_28>
+  <Unit_2_Key_29 ua="na"></Unit_2_Key_29>
+  <Unit_2_Key_30 ua="na"></Unit_2_Key_30>
+  <Unit_2_Key_31 ua="na"></Unit_2_Key_31>
+  <Unit_2_Key_32 ua="na"></Unit_2_Key_32>
+  <Daylight_Saving_Time_Enable ua="na">yes</Daylight_Saving_Time_Enable>
+  <Preferred_Codec_1_ ua="na">G711u</Preferred_Codec_1_>
+  <Use_Pref_Codec_Only_1_ ua="na">Yes</Use_Pref_Codec_Only_1_>
+  <Back_Light_Timer ua="rw">Always On</Back_Light_Timer>
+  <Screen_Saver_Enable ua="rw">No</Screen_Saver_Enable>
+  <Screen_Saver_Type ua="rw">Clock</Screen_Saver_Type>
+  <Screen_Saver_Wait ua="rw">300</Screen_Saver_Wait>
+  <Screen_Saver_Refresh_Period ua="rw">10</Screen_Saver_Refresh_Period>
+</flat-profile>

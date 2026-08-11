@@ -2,9 +2,10 @@
 # Small Express app; no build step, so a single stage keeps it simple.
 FROM node:22-alpine
 
-# Tini gives us correct signal handling so `docker stop` exits promptly
-# instead of waiting out the 10s kill timeout.
-RUN apk add --no-cache tini
+# tini: correct signal handling so `docker stop` exits promptly rather than
+#       waiting out the 10s kill timeout.
+# openssl: used to generate a self-signed certificate when TLS_ENABLED=true.
+RUN apk add --no-cache tini openssl
 
 ENV NODE_ENV=production \
     PORT=3000 \
@@ -16,7 +17,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY server.js auth.js auth-routes.js ./
+COPY server.js auth.js auth-routes.js tls-setup.js ./
 COPY public ./public
 # Bundled placeholder template; a real one mounted at /data takes precedence.
 COPY examples ./examples
@@ -31,8 +32,10 @@ VOLUME ["/data"]
 
 # Probes /api/auth/me: it is the one endpoint that answers 200 whether or not
 # anyone is signed in, so the check reflects "Express is serving", not "logged in".
+# Follows the app's own scheme, and skips verification because a self-signed
+# certificate is expected here.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD node -e "require('http').get({host:'127.0.0.1',port:process.env.PORT||3000,path:'/api/auth/me',timeout:4000},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+  CMD node -e "const tls=(process.env.TLS_ENABLED||'').toLowerCase()==='true'||!!process.env.TLS_CERT;require(tls?'https':'http').get({host:'127.0.0.1',port:process.env.PORT||3000,path:'/api/auth/me',timeout:4000,rejectUnauthorized:false},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "server.js"]

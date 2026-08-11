@@ -165,6 +165,9 @@ The container logs which template it resolved at startup, so check `docker compo
 | `DEFAULT_TEMPLATE_PATH` | unset | Explicit path to the default template XML |
 | `TZ` | `UTC` | Affects timestamps shown in the change log |
 | `COOKIE_SECURE` | `false` | Set `true` when serving over HTTPS so the session cookie is marked Secure |
+| `TLS_ENABLED` | `false` | Serve HTTPS using a self-signed certificate generated into `DATA_DIR/tls` |
+| `TLS_HOSTS` | unset | Extra names/IPs for the generated certificate's SANs, comma separated |
+| `TLS_CERT` / `TLS_KEY` | unset | Paths to your own certificate and key; take precedence over `TLS_ENABLED` |
 | `TRUST_PROXY_AUTH` | `false` | Accept a reverse proxy's authentication header (see above) |
 | `PROXY_USER_HEADER` | `remote-user` | Which header carries the username in that mode |
 
@@ -205,6 +208,69 @@ An administrator opens **Users** and clicks **Reset MFA**. That user can then si
 their password alone and enrol again. If the *only* administrator is locked out, stop the
 container, edit `users.json` in the data directory, set `"mfaEnrolled": false` and
 `"totpSecret": null` on that account, and start it again.
+
+### HTTPS
+The app serves plain HTTP by default, which is fine on loopback. Turn on TLS when anything
+crosses a network - in particular when a reverse proxy runs on a **different host**, because
+that hop would otherwise carry passwords, TOTP codes and session cookies in clear text.
+
+**Self-signed, generated for you.** Set `TLS_ENABLED=true` and the app creates a certificate
+in `/data/tls` on first boot and reuses it afterwards, regenerating when it is missing,
+unreadable, or within 30 days of expiry:
+
+```yaml
+environment:
+  TLS_ENABLED: "true"
+  TLS_HOSTS: "pbx-manager,192.168.1.50"   # names and IPs the cert should cover
+  COOKIE_SECURE: "true"
+```
+
+`TLS_HOSTS` is optional but worth setting: it becomes the certificate's Subject Alternative
+Names, so the address your proxy connects to is actually covered. `localhost`, `127.0.0.1`
+and the container hostname are always included.
+
+A self-signed certificate is fine as a **reverse proxy upstream**, because proxies do not
+verify upstream certificates by default. A browser connecting directly will warn.
+
+**Bring your own certificate.** Set both `TLS_CERT` and `TLS_KEY` and they take precedence
+over generation:
+
+```yaml
+environment:
+  TLS_CERT: /certs/fullchain.pem
+  TLS_KEY: /certs/privkey.pem
+  COOKIE_SECURE: "true"
+volumes:
+  - /etc/letsencrypt/live/pbx.example.com:/certs:ro
+```
+
+The app exits with an explanation rather than quietly falling back to HTTP if TLS is
+requested but cannot be set up.
+
+### What about Let's Encrypt?
+There is no ACME client built in, and for the usual setup you do not want one:
+
+- **Your proxy already does it.** Nginx Proxy Manager, Caddy and Traefik all obtain and renew
+  Let's Encrypt certificates for the browser-facing side. That is the leg that needs a
+  publicly trusted certificate.
+- **This app usually cannot pass validation.** HTTP-01 and TLS-ALPN-01 need the app reachable
+  from the internet on port 80/443 at the public name. An internal PBX tool normally is not.
+- **It would buy nothing on the proxy hop.** Proxies do not verify upstream certificates, so
+  a trusted certificate is no more protective there than the generated self-signed one.
+
+If you do want a real certificate on the app itself - for example to reach it directly by
+hostname without warnings - obtain it with any ACME client that supports **DNS-01** (certbot,
+acme.sh, lego), which needs no inbound access, and point `TLS_CERT`/`TLS_KEY` at the result.
+Mount certbot's `live` directory and the app picks up renewals when the container restarts:
+
+```bash
+certbot certonly --dns-cloudflare -d pbx.example.com
+```
+```bash
+docker compose restart pbx-manager
+```
+
+Certificates are only read at startup, so schedule a restart after your renewal hook.
 
 ### Behind Nginx Proxy Manager
 Use NPM purely for TLS and hostname routing and let the app's own sign-in handle
@@ -249,10 +315,29 @@ The app does not read `X-Forwarded-*` headers, so no extra proxy configuration i
 Lockout is tracked per account rather than per IP, so it keeps working correctly even though
 every request now arrives from the proxy's address.
 
-If you would rather keep the host port instead of sharing a network, NPM must forward to the
-host rather than to `127.0.0.1` (which inside NPM's container means NPM itself). In that case
-change the mapping to your LAN IP and forward to that - but the hop from NPM to the app is
-then unencrypted, so only do it on a network you trust.
+#### When NPM is on a different host
+A shared Docker network is not available across machines, so the app has to listen on the
+network and NPM forwards to it. That hop leaves the machine, so **encrypt it**:
+
+1. Publish on the LAN address rather than loopback, and turn on TLS:
+   ```yaml
+   ports:
+     - "192.168.1.50:3000:3000"     # this host's LAN IP, not 0.0.0.0
+   environment:
+     TLS_ENABLED: "true"
+     TLS_HOSTS: "192.168.1.50"      # whatever NPM will connect to
+     COOKIE_SECURE: "true"
+   ```
+2. Firewall port 3000 so only NPM's address can reach it.
+3. In NPM set **Scheme** to `https`, Forward Hostname to `192.168.1.50`, Forward Port `3000`.
+   NPM does not verify the upstream certificate, so the self-signed one is accepted.
+
+Without step 1 the browser-to-NPM leg is encrypted and the NPM-to-app leg is not, which
+leaves credentials readable by anything on the path between the two LANs.
+
+If you would rather keep the hop unencrypted, that is a deliberate choice: restrict it by
+firewall and be aware that anyone able to observe traffic between those networks can read
+sign-ins and replay session cookies.
 
 > **Check the startup log after switching.** It prints `Session cookie: Secure ...` once
 > `COOKIE_SECURE=true` is in effect. If you set that flag while still serving plain HTTP,

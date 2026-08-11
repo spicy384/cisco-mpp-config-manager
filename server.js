@@ -44,6 +44,7 @@ app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 const { createAuth } = require("./auth-routes");
+const { resolveTlsOptions } = require("./tls-setup");
 const authGuard = createAuth({ dataDir: DATA_DIR });
 
 // Auth endpoints are mounted first: they must be reachable while signed out.
@@ -1256,9 +1257,33 @@ if (require.main === module) {
   ensureDataStore();
   loadFileMetadataCache();
 
-  app.listen(PORT, () => {
-    console.log(`PBX MPP Config Manager running at http://localhost:${PORT}`);
+  let tlsOptions = null;
+  try {
+    tlsOptions = resolveTlsOptions({ dataDir: DATA_DIR });
+  } catch (error) {
+    // Failing loudly beats silently falling back to plain HTTP when TLS was asked for.
+    console.error(`\n  !! TLS could not be configured: ${error.message}\n`);
+    process.exit(1);
+  }
+
+  const scheme = tlsOptions ? "https" : "http";
+  const server = tlsOptions
+    ? require("https").createServer({ key: tlsOptions.key, cert: tlsOptions.cert }, app)
+    : require("http").createServer(app);
+
+  server.listen(PORT, () => {
+    console.log(`PBX MPP Config Manager running at ${scheme}://localhost:${PORT}`);
     console.log(`Data directory: ${DATA_DIR}`);
+
+    if (tlsOptions) {
+      console.log(`TLS: on (${tlsOptions.mode}) - ${tlsOptions.detail}`);
+      if (tlsOptions.mode === "self-signed") {
+        console.log("     Self-signed: fine for a reverse proxy upstream, but browsers "
+          + "connecting directly will warn.");
+      }
+    } else {
+      console.log("TLS: off (plain HTTP)");
+    }
 
     // Say so explicitly: a missing template silently yields an empty "Default Template".
     const templatePath = resolveDefaultTemplatePath();
@@ -1273,9 +1298,13 @@ if (require.main === module) {
       console.log(`Accounts: ${authGuard.loadUsers().length} user(s) configured.`);
     }
 
-    console.log(authGuard.cookieSecure
-      ? "Session cookie: Secure (expects HTTPS in front - sign-in will fail over plain HTTP)"
-      : "Session cookie: not Secure (fine on loopback; set COOKIE_SECURE=true behind HTTPS)");
+    if (authGuard.cookieSecure) {
+      console.log("Session cookie: Secure (requires HTTPS end to end - sign-in fails over plain HTTP)");
+    } else if (tlsOptions) {
+      console.log("Session cookie: not Secure - this app is serving HTTPS, so set COOKIE_SECURE=true");
+    } else {
+      console.log("Session cookie: not Secure (fine on loopback; set COOKIE_SECURE=true behind HTTPS)");
+    }
 
     if (authGuard.trustProxyAuth) {
       console.warn(

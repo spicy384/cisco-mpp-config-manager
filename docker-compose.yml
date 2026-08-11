@@ -27,15 +27,39 @@ services:
       # Secure. Leave false on plain HTTP or sign-in will not work at all.
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
 
+      # --- HTTPS -----------------------------------------------------------
+      # Encrypts the hop between a reverse proxy and this app, which matters when the
+      # proxy runs on a different host. With TLS_ENABLED=true the app generates and
+      # reuses a self-signed certificate in /data/tls - proxies do not verify upstream
+      # certificates, so that is sufficient for them. Browsers connecting directly warn.
+      #
+      # Set these in your shell, a .env file next to this compose file, or edit the
+      # defaults here:
+      #   TLS_ENABLED=true TLS_HOSTS=192.168.1.50 COOKIE_SECURE=true docker compose up -d
+      TLS_ENABLED: ${TLS_ENABLED:-false}
+
+      # Names and IPs the generated certificate should cover, comma separated.
+      # localhost, 127.0.0.1 and the container hostname are always included.
+      TLS_HOSTS: ${TLS_HOSTS:-}
+
+      # Or supply your own certificate (Let's Encrypt via DNS-01, an internal CA,
+      # anything). These take precedence over TLS_ENABLED; mount them read-only below.
+      TLS_CERT: ${TLS_CERT:-}
+      TLS_KEY: ${TLS_KEY:-}
+
       # Only enable with an auth proxy in front that strips this header from client
       # requests - otherwise anyone reaching the port can impersonate any user.
       # TRUST_PROXY_AUTH: "true"
       # PROXY_USER_HEADER: remote-user
 
-    # User accounts, sessions, saved servers, templates and the change log persist here.
-    # Treat it as sensitive: it holds password hashes and TOTP secrets.
+    # User accounts, sessions, saved servers, templates and the change log persist here,
+    # along with any generated TLS certificate. Treat it as sensitive: it holds password
+    # hashes, TOTP secrets and a private key.
     volumes:
       - pbx-data:/data
+      # To supply your own certificate, mount it read-only and set TLS_CERT/TLS_KEY above.
+      # Certbot's live directory works directly; renewals are picked up on restart.
+      # - /etc/letsencrypt/live/pbx.example.com:/certs:ro
 
     # Run exactly one instance: the SFTP connection and in-flight bulk jobs are
     # held in memory, so a second replica would not share them.

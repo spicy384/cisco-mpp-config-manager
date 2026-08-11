@@ -1,0 +1,20 @@
+{
+  "name": "pbx-mpp-config-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Small web app to manage Cisco MPP XML configs on FreePBX via SFTP.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node test/run-all.js",
+    "test:unit": "node test/unit.test.js",
+    "test:e2e": "node test/e2e.test.js",
+    "mock-pbx": "node test/mock-pbx.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "fast-xml-parser": "^5.10.1",
+    "ssh2-sftp-client": "^11.0.0"
+  }
+}

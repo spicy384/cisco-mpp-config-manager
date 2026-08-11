@@ -1,0 +1,1371 @@
+﻿const statusEl = document.getElementById("status");
+const connectionPanel = document.getElementById("connection-panel");
+const connectionSummary = document.getElementById("connection-summary");
+const connectedServerNameEl = document.getElementById("connected-server-name");
+const connectForm = document.getElementById("connect-form");
+const disconnectBtn = document.getElementById("disconnect-btn");
+const collapseConnectionBtn = document.getElementById("collapse-connection-btn");
+const disconnectMiniBtn = document.getElementById("disconnect-mini-btn");
+const expandConnectionBtn = document.getElementById("expand-connection-btn");
+const refreshBtn = document.getElementById("refresh-btn");
+const fileListEl = document.getElementById("file-list");
+const filesLoadingEl = document.getElementById("files-loading");
+const filesSearchInput = document.getElementById("files-search");
+const filesCountEl = document.getElementById("files-count");
+const entriesBody = document.getElementById("entries-body");
+const fileNameInput = document.getElementById("file-name");
+const rootKeyInput = document.getElementById("root-key");
+const createSourceSelect = document.getElementById("create-source-select");
+const addRowBtn = document.getElementById("add-row");
+const saveBtn = document.getElementById("save-btn");
+const saveTopBtn = document.getElementById("save-top-btn");
+const createBtn = document.getElementById("create-btn");
+const createTopBtn = document.getElementById("create-top-btn");
+const resetBtn = document.getElementById("reset-btn");
+const resetTopBtn = document.getElementById("reset-top-btn");
+const showAllTopBtn = document.getElementById("show-all-top-btn");
+const showAllBottomBtn = document.getElementById("show-all-bottom-btn");
+const hideEmptyBtn = document.getElementById("hide-empty-btn");
+const searchInput = document.getElementById("editor-search");
+const themeToggleBtn = document.getElementById("theme-toggle");
+const templateSelect = document.getElementById("template-select");
+const templateNameInput = document.getElementById("template-name");
+const loadTemplateBtn = document.getElementById("load-template-btn");
+const saveTemplateBtn = document.getElementById("save-template-btn");
+
+const selectAllBtn = document.getElementById("select-all-btn");
+const selectNoneBtn = document.getElementById("select-none-btn");
+const bulkKeyInput = document.getElementById("bulk-key");
+const bulkValueInput = document.getElementById("bulk-value");
+const bulkAttrsInput = document.getElementById("bulk-attrs");
+const bulkModeSelect = document.getElementById("bulk-mode");
+const bulkPreviewBtn = document.getElementById("bulk-preview-btn");
+const bulkApplyBtn = document.getElementById("bulk-apply-btn");
+const bulkSelectionCountEl = document.getElementById("bulk-selection-count");
+const bulkResultsEl = document.getElementById("bulk-results");
+const bulkProgressEl = document.getElementById("bulk-progress");
+const bulkProgressLabelEl = document.getElementById("bulk-progress-label");
+const bulkProgressBarEl = document.getElementById("bulk-progress-bar");
+
+const logScopeSelect = document.getElementById("log-scope-select");
+const logSearchInput = document.getElementById("log-search");
+const logRefreshBtn = document.getElementById("log-refresh-btn");
+const logExportBtn = document.getElementById("log-export-btn");
+const logClearBtn = document.getElementById("log-clear-btn");
+const logMetaEl = document.getElementById("log-meta");
+const logResultsEl = document.getElementById("log-results");
+
+const serverSelect = document.getElementById("server-select");
+const serverNameInput = document.getElementById("server-name");
+const saveServerBtn = document.getElementById("save-server-btn");
+const deleteServerBtn = document.getElementById("delete-server-btn");
+
+const editorCountEl = document.getElementById("editor-count");
+
+const rowTemplate = document.getElementById("row-template");
+
+let currentFile = "";
+let hideEmpty = false;
+let showAllFields = false;
+let baseline = { rootKey: "flat-profile", entries: [] };
+let searchQuery = "";
+let filesQuery = "";
+let servers = [];
+let allFiles = [];
+let templates = [];
+let currentTheme = "light";
+let lastConnectionInfo = null;
+const selectedFiles = new Set();
+// Set once a preview succeeds; cleared whenever the edit or selection changes,
+// so "Apply" can never run against a stale preview.
+let previewedEdit = null;
+let bulkBusy = false;
+let logEntries = [];
+let logScopes = [];
+
+const IMPORTANT_FIELDS = new Set([
+  "Admin_Passwd",
+  "Display_Name_1_",
+  "Password_1_",
+  "Proxy_1_",
+  "Short_Name_1_",
+  "Station_Display_Name",
+  "User_ID_1_",
+  "Voice_Mail_Number",
+  "Phone_Background",
+  "Picture_Download_URL"
+]);
+
+for (let i = 1; i <= 16; i += 1) {
+  IMPORTANT_FIELDS.add(`Extended_Function_${i}_`);
+  IMPORTANT_FIELDS.add(`Extension_${i}_`);
+}
+
+function isImportantTag(tag) {
+  return IMPORTANT_FIELDS.has(String(tag || "").trim());
+}
+
+function deepClone(obj) {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+function setStatus(message, isError = false) {
+  statusEl.textContent = message;
+  statusEl.classList.toggle("is-error", isError);
+}
+
+function setFilesLoading(isLoading) {
+  filesLoadingEl.hidden = !isLoading;
+  if (isLoading) {
+    filesCountEl.textContent = "Loading...";
+  }
+}
+
+function applyTheme(theme) {
+  currentTheme = theme === "dark" ? "dark" : "light";
+  document.body.classList.toggle("theme-dark", currentTheme === "dark");
+
+  // The button also holds icons, so only the label text is swapped.
+  const label = themeToggleBtn.querySelector(".theme-label");
+  if (label) {
+    label.textContent = currentTheme === "dark" ? "Light Theme" : "Dark Theme";
+  }
+
+  localStorage.setItem("pbx-theme", currentTheme);
+}
+
+function setConnectionCollapsed(collapsed, connectionData = null) {
+  const info = connectionData || lastConnectionInfo;
+
+  connectForm.hidden = collapsed;
+  statusEl.hidden = collapsed;
+  connectionSummary.hidden = !collapsed;
+  collapseConnectionBtn.hidden = collapsed;
+
+  connectionPanel.classList.toggle("collapsed", collapsed);
+  document.body.classList.toggle("connection-collapsed", collapsed);
+
+  if (collapsed) {
+    const selectedLabel = serverSelect.options[serverSelect.selectedIndex]?.text || "";
+    const cleanedSelected = selectedLabel.replace(/ \(.+\)$/, "");
+    const displayName = info?.profileName || serverNameInput.value.trim() || cleanedSelected || info?.host || "Connected";
+    connectedServerNameEl.textContent = displayName;
+  }
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
+  return data;
+}
+
+function updateShowAllButtons() {
+  const label = showAllFields ? "Show Important Fields" : "Show All Fields";
+  showAllTopBtn.textContent = label;
+  showAllBottomBtn.textContent = label;
+}
+
+function applyRowVisibility() {
+  const q = searchQuery.trim().toLowerCase();
+  let total = 0;
+  let visible = 0;
+
+  for (const row of entriesBody.querySelectorAll("tr")) {
+    const tag = row.querySelector(".tag")?.value || "";
+    const value = row.querySelector(".value")?.value || "";
+    const attrs = row.querySelector(".attrs")?.value || "";
+
+    const important = isImportantTag(tag);
+    row.dataset.important = important ? "1" : "0";
+
+    const hideByImportance = !showAllFields && !important;
+    const hideByEmpty = hideEmpty && value.trim().length === 0;
+    const matchesSearch = !q || tag.toLowerCase().includes(q) || value.toLowerCase().includes(q) || attrs.toLowerCase().includes(q);
+
+    const hidden = hideByImportance || hideByEmpty || !matchesSearch;
+    row.classList.toggle("hidden-empty", hidden);
+
+    total += 1;
+    if (!hidden) {
+      visible += 1;
+    }
+  }
+
+  updateEditorCount(visible, total);
+  hideEmptyBtn.textContent = hideEmpty ? "Show Empty Values" : "Hide Empty Values";
+  updateShowAllButtons();
+}
+
+function updateEditorCount(visible, total) {
+  if (total === 0) {
+    editorCountEl.textContent = currentFile ? "0 fields" : "No file loaded";
+    return;
+  }
+
+  editorCountEl.textContent = visible === total
+    ? `${total} field${total === 1 ? "" : "s"}`
+    : `${visible} of ${total} fields`;
+}
+
+function toggleDeletedRow(row) {
+  const isDeleted = row.classList.toggle("deleted");
+  const btn = row.querySelector(".remove-row");
+  btn.textContent = isDeleted ? "Undo" : "Delete";
+  btn.classList.toggle("secondary", isDeleted);
+  btn.classList.toggle("danger", !isDeleted);
+}
+
+function makeEntryFromRow(row) {
+  const attrsText = row.querySelector(".attrs")?.value?.trim() || "";
+  let attributes = {};
+
+  if (attrsText) {
+    try {
+      attributes = JSON.parse(attrsText);
+    } catch {
+      attributes = {};
+    }
+  }
+
+  return {
+    key: row.querySelector(".tag")?.value || "",
+    value: row.querySelector(".value")?.value || "",
+    attributes
+  };
+}
+
+function addRow(entry = { key: "", value: "", attributes: {} }) {
+  const row = rowTemplate.content.firstElementChild.cloneNode(true);
+  row.querySelector(".tag").value = entry.key || "";
+  row.querySelector(".value").value = entry.value || "";
+  row.querySelector(".attrs").value = JSON.stringify(entry.attributes || {});
+
+  row.querySelector(".remove-row").addEventListener("click", () => {
+    toggleDeletedRow(row);
+  });
+
+  row.querySelector(".duplicate-row").addEventListener("click", () => {
+    const copy = addRow(makeEntryFromRow(row));
+    row.insertAdjacentElement("afterend", copy);
+    applyRowVisibility();
+  });
+
+  row.querySelector(".tag").addEventListener("input", applyRowVisibility);
+  row.querySelector(".value").addEventListener("input", applyRowVisibility);
+  row.querySelector(".attrs").addEventListener("input", applyRowVisibility);
+
+  entriesBody.appendChild(row);
+  applyRowVisibility();
+  return row;
+}
+
+function clearRows() {
+  entriesBody.innerHTML = "";
+}
+
+function readEntries() {
+  return [...entriesBody.querySelectorAll("tr")]
+    .filter((tr) => !tr.classList.contains("deleted"))
+    .map((tr) => {
+      const attrsText = tr.querySelector(".attrs").value.trim();
+      let attributes = {};
+
+      if (attrsText) {
+        try {
+          attributes = JSON.parse(attrsText);
+        } catch {
+          throw new Error("Attributes must be valid JSON on every row.");
+        }
+      }
+
+      return {
+        key: tr.querySelector(".tag").value.trim(),
+        value: tr.querySelector(".value").value,
+        attributes
+      };
+    })
+    .filter((entry) => entry.key.length > 0);
+}
+
+function setBaseline(rootKey, entries) {
+  baseline = {
+    rootKey: rootKey || "flat-profile",
+    entries: deepClone(entries || [])
+  };
+}
+
+function loadEntriesIntoEditor(entries) {
+  clearRows();
+  (entries || []).forEach((entry) => addRow(entry));
+  applyRowVisibility();
+}
+
+function getFilteredFiles() {
+  const q = filesQuery.trim().toLowerCase();
+  if (!q) {
+    return allFiles;
+  }
+
+  return allFiles.filter((file) => {
+    const name = String(file.name || "").toLowerCase();
+    const station = String(file.stationDisplayName || "").toLowerCase();
+    return name.includes(q) || station.includes(q);
+  });
+}
+
+function makeFileRowDiv(className, text, strong = false) {
+  const div = document.createElement("div");
+  div.className = className;
+
+  if (strong) {
+    const el = document.createElement("strong");
+    el.textContent = text;
+    div.appendChild(el);
+  } else {
+    div.textContent = text;
+  }
+
+  return div;
+}
+
+function renderFileList(files) {
+  fileListEl.innerHTML = "";
+  filesCountEl.textContent = `${files.length} file${files.length === 1 ? "" : "s"}`;
+
+  for (const file of files) {
+    const li = document.createElement("li");
+    const station = file.stationDisplayName?.trim() || "(No Station_Display_Name)";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "file-check";
+    checkbox.checked = selectedFiles.has(file.name);
+    checkbox.title = "Select for bulk edit";
+    // Keep ticking the box from also opening the file in the editor.
+    checkbox.addEventListener("click", (e) => e.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        selectedFiles.add(file.name);
+      } else {
+        selectedFiles.delete(file.name);
+      }
+      onSelectionChanged();
+    });
+
+    const details = document.createElement("div");
+    details.className = "file-details";
+    // Station name leads: file names are MAC addresses and identify nothing on their own.
+    // textContent throughout: station names come from remote files and must not be parsed as HTML.
+    details.appendChild(makeFileRowDiv("file-station", station));
+    details.appendChild(makeFileRowDiv("file-name", file.name, true));
+    details.appendChild(makeFileRowDiv("file-size", `${(file.size || 0).toLocaleString()} bytes`));
+
+    li.appendChild(checkbox);
+    li.appendChild(details);
+
+    if (file.name === currentFile) {
+      li.classList.add("active");
+    }
+
+    details.addEventListener("click", () => loadFile(file.name));
+    fileListEl.appendChild(li);
+  }
+}
+
+function renderServerOptions() {
+  const selected = serverSelect.value;
+  serverSelect.innerHTML = "";
+
+  const emptyOption = document.createElement("option");
+  emptyOption.value = "";
+  emptyOption.textContent = "(Direct connection / no saved server selected)";
+  serverSelect.appendChild(emptyOption);
+
+  servers.forEach((server) => {
+    const option = document.createElement("option");
+    option.value = server.id;
+    option.textContent = `${server.name} (${server.host})`;
+    serverSelect.appendChild(option);
+  });
+
+  serverSelect.value = servers.some((s) => s.id === selected) ? selected : "";
+}
+
+function renderTemplateOptions() {
+  const templateSelected = templateSelect.value;
+  const createSourceSelected = createSourceSelect.value;
+
+  templateSelect.innerHTML = "";
+  createSourceSelect.innerHTML = "";
+
+  const blankOpt = document.createElement("option");
+  blankOpt.value = "blank";
+  blankOpt.textContent = "Blank";
+  createSourceSelect.appendChild(blankOpt);
+
+  for (const t of templates) {
+    const opt1 = document.createElement("option");
+    opt1.value = t.id;
+    opt1.textContent = t.name;
+    templateSelect.appendChild(opt1);
+
+    const opt2 = document.createElement("option");
+    opt2.value = t.id;
+    opt2.textContent = t.name;
+    createSourceSelect.appendChild(opt2);
+  }
+
+  templateSelect.value = templates.some((t) => t.id === templateSelected) ? templateSelected : "default";
+  createSourceSelect.value = (["blank", ...templates.map((t) => t.id)]).includes(createSourceSelected) ? createSourceSelected : "default";
+}
+
+async function refreshServers() {
+  const data = await api("/api/servers");
+  servers = data.servers || [];
+  renderServerOptions();
+}
+
+async function refreshTemplates() {
+  const data = await api("/api/templates");
+  templates = data.templates || [];
+  renderTemplateOptions();
+}
+
+async function getTemplateById(id) {
+  return api(`/api/templates/${encodeURIComponent(id)}`);
+}
+
+function fillFormFromServer(serverId) {
+  const server = servers.find((s) => s.id === serverId);
+  if (!server) {
+    return;
+  }
+
+  serverNameInput.value = server.name || "";
+  connectForm.elements.host.value = server.host || "";
+  connectForm.elements.port.value = server.port || 22;
+  connectForm.elements.username.value = server.username || "";
+  connectForm.elements.remoteDir.value = server.remoteDir || "";
+}
+
+async function refreshFiles() {
+  setFilesLoading(true);
+  try {
+    const data = await api("/api/files");
+    allFiles = data.files || [];
+
+    // Drop selections for files that no longer exist on the server.
+    const present = new Set(allFiles.map((file) => file.name));
+    for (const name of [...selectedFiles]) {
+      if (!present.has(name)) {
+        selectedFiles.delete(name);
+      }
+    }
+
+    renderFileList(getFilteredFiles());
+    onSelectionChanged();
+  } finally {
+    setFilesLoading(false);
+  }
+}
+
+async function loadFile(name) {
+  const data = await api(`/api/files/${encodeURIComponent(name)}`);
+
+  currentFile = data.fileName;
+  fileNameInput.value = data.fileName;
+  rootKeyInput.value = data.rootKey || "flat-profile";
+
+  showAllFields = false;
+  loadEntriesIntoEditor(data.entries || []);
+  setBaseline(data.rootKey || "flat-profile", data.entries || []);
+
+  renderFileList(getFilteredFiles());
+  setStatus(`Loaded ${data.fileName}`);
+}
+
+function resetEditorToBaseline() {
+  rootKeyInput.value = baseline.rootKey || "flat-profile";
+  loadEntriesIntoEditor(deepClone(baseline.entries || []));
+  setStatus("Editor reset to last loaded state.");
+}
+
+async function saveCurrentFile() {
+  const fileName = fileNameInput.value.trim();
+  if (!fileName) {
+    setStatus("File name is required.", true);
+    return;
+  }
+
+  const entries = readEntries();
+  const rootKey = rootKeyInput.value.trim() || "flat-profile";
+
+  await api(`/api/files/${encodeURIComponent(fileName)}`, {
+    method: "POST",
+    body: JSON.stringify({ rootKey, entries })
+  });
+
+  currentFile = fileName;
+  loadEntriesIntoEditor(entries);
+  setBaseline(rootKey, entries);
+  renderFileList(getFilteredFiles());
+  refreshFiles().catch(() => {});
+  refreshLogScopes().catch(() => {});
+  setStatus(`Saved ${fileName}`);
+}
+
+async function createNewFile() {
+  const fileName = fileNameInput.value.trim();
+  if (!fileName) {
+    setStatus("File name is required.", true);
+    return;
+  }
+
+  const sourceId = createSourceSelect.value;
+  let rootKey = rootKeyInput.value.trim() || "flat-profile";
+  let entries = [];
+
+  if (sourceId === "blank") {
+    if (!confirm("Create a new config with a blank field set? This will replace the current editor fields.")) {
+      return;
+    }
+    entries = [];
+    rootKey = "flat-profile";
+  } else {
+    const tpl = await getTemplateById(sourceId);
+    if (!confirm(`Create a new config using template "${tpl.name}"? This will replace the current editor fields.`)) {
+      return;
+    }
+    entries = deepClone(tpl.entries || []);
+    rootKey = String(tpl.rootKey || "flat-profile");
+  }
+
+  await api("/api/files", {
+    method: "POST",
+    body: JSON.stringify({ fileName, rootKey, entries })
+  });
+
+  currentFile = fileName;
+  showAllFields = false;
+  rootKeyInput.value = rootKey;
+  loadEntriesIntoEditor(entries);
+  setBaseline(rootKey, entries);
+  renderFileList(getFilteredFiles());
+  refreshFiles().catch(() => {});
+  refreshLogScopes().catch(() => {});
+  setStatus(`Created ${fileName}`);
+}
+
+async function saveTemplate() {
+  const name = templateNameInput.value.trim();
+  if (!name) {
+    setStatus("Template name is required.", true);
+    return;
+  }
+
+  const entries = readEntries();
+  const rootKey = rootKeyInput.value.trim() || "flat-profile";
+
+  await api("/api/templates", {
+    method: "POST",
+    body: JSON.stringify({ name, rootKey, entries })
+  });
+
+  templateNameInput.value = "";
+  await refreshTemplates();
+  setStatus(`Saved template: ${name}`);
+}
+
+async function loadTemplateIntoEditor() {
+  const templateId = templateSelect.value;
+  if (!templateId) {
+    setStatus("Select a template first.", true);
+    return;
+  }
+
+  if (!confirm("Loading a template will replace all current fields in the editor. Continue?")) {
+    return;
+  }
+
+  const tpl = await getTemplateById(templateId);
+  showAllFields = false;
+  rootKeyInput.value = String(tpl.rootKey || "flat-profile");
+  loadEntriesIntoEditor(deepClone(tpl.entries || []));
+  setBaseline(rootKeyInput.value, readEntries());
+  setStatus(`Loaded template: ${tpl.name}`);
+}
+
+async function saveServerProfile() {
+  const host = connectForm.elements.host.value.trim();
+  const port = connectForm.elements.port.value.trim();
+  const username = connectForm.elements.username.value.trim();
+  const remoteDir = connectForm.elements.remoteDir.value.trim();
+  const name = serverNameInput.value.trim();
+
+  if (!name || !host || !username || !remoteDir) {
+    setStatus("Server Name, Host, Username, and Remote XML Directory are required to save a PBX server.", true);
+    return;
+  }
+
+  const payload = {
+    id: serverSelect.value || undefined,
+    name,
+    host,
+    port: Number(port) || 22,
+    username,
+    remoteDir
+  };
+
+  const data = await api("/api/servers", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+
+  await refreshServers();
+  serverSelect.value = data.profile.id;
+  setStatus(`Saved server profile: ${data.profile.name}`);
+}
+
+async function deleteSelectedServer() {
+  const id = serverSelect.value;
+  if (!id) {
+    setStatus("Select a saved PBX server to delete.", true);
+    return;
+  }
+
+  await api(`/api/servers/${encodeURIComponent(id)}`, { method: "DELETE" });
+  await refreshServers();
+  serverNameInput.value = "";
+  setStatus("Deleted saved PBX server.");
+}
+
+function disconnectFromServer() {
+  return api("/api/connection", { method: "DELETE" });
+}
+
+function onSelectionChanged() {
+  const count = selectedFiles.size;
+  bulkSelectionCountEl.textContent = `${count} file${count === 1 ? "" : "s"} selected`;
+  invalidatePreview();
+}
+
+// Any change to the edit or the file set makes an existing preview untrustworthy.
+function invalidatePreview() {
+  if (!previewedEdit) {
+    return;
+  }
+  previewedEdit = null;
+  bulkApplyBtn.disabled = true;
+  bulkResultsEl.replaceChildren();
+}
+
+function readBulkEditRequest() {
+  const key = bulkKeyInput.value.trim();
+  if (!key) {
+    throw new Error("Enter the tag name to bulk edit.");
+  }
+
+  if (selectedFiles.size === 0) {
+    throw new Error("Tick at least one file in the XML Files list.");
+  }
+
+  const attrsText = bulkAttrsInput.value.trim();
+  let attributes = null;
+
+  if (attrsText) {
+    try {
+      attributes = JSON.parse(attrsText);
+    } catch {
+      throw new Error("Attributes must be valid JSON (or blank to keep existing).");
+    }
+
+    if (typeof attributes !== "object" || Array.isArray(attributes)) {
+      throw new Error("Attributes must be a JSON object, e.g. {\"ua\":\"na\"}.");
+    }
+  }
+
+  return {
+    fileNames: [...selectedFiles],
+    key,
+    value: bulkValueInput.value,
+    attributes,
+    mode: bulkModeSelect.value
+  };
+}
+
+const BULK_STATUS_LABEL = {
+  changed: "Will change",
+  unchanged: "No change needed",
+  missing: "Tag not present - skipped",
+  error: "Error"
+};
+
+function renderBulkResults(data) {
+  bulkResultsEl.replaceChildren();
+
+  const summary = document.createElement("div");
+  summary.className = "bulk-summary";
+  const counts = data.summary || {};
+  const parts = [
+    `${counts.changed || 0} to change`,
+    `${counts.unchanged || 0} already correct`,
+    `${counts.missing || 0} skipped`,
+    `${counts.error || 0} errors`
+  ];
+  summary.textContent = `${data.dryRun ? "Preview" : "Applied"}: ${parts.join(" | ")}`;
+  bulkResultsEl.appendChild(summary);
+
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["Phone", "File", "Status", "Current Value", "New Value"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const item of data.results || []) {
+    const tr = document.createElement("tr");
+    tr.className = `bulk-row-${item.status}`;
+
+    const stationTd = document.createElement("td");
+    stationTd.textContent = item.station || "-";
+    tr.appendChild(stationTd);
+
+    const nameTd = document.createElement("td");
+    nameTd.textContent = item.name;
+    tr.appendChild(nameTd);
+
+    const statusTd = document.createElement("td");
+    statusTd.textContent = item.error || BULK_STATUS_LABEL[item.status] || item.status;
+    tr.appendChild(statusTd);
+
+    const beforeTd = document.createElement("td");
+    beforeTd.textContent = (item.previousValues || []).join(", ");
+    tr.appendChild(beforeTd);
+
+    const afterTd = document.createElement("td");
+    if (item.status === "changed") {
+      afterTd.textContent = data.mode === "delete" ? "(tag removed)" : String(item.newValue ?? "");
+    }
+    tr.appendChild(afterTd);
+
+    tbody.appendChild(tr);
+  }
+
+  table.appendChild(tbody);
+  bulkResultsEl.appendChild(table);
+}
+
+function setBulkBusy(busy, verb = "Working") {
+  bulkBusy = busy;
+  bulkProgressEl.hidden = !busy;
+  bulkPreviewBtn.disabled = busy;
+  bulkApplyBtn.disabled = busy || !previewedEdit;
+  selectAllBtn.disabled = busy;
+  selectNoneBtn.disabled = busy;
+
+  if (busy) {
+    bulkProgressBarEl.style.width = "0%";
+    bulkProgressLabelEl.textContent = `${verb}...`;
+  }
+}
+
+function updateBulkProgress(job, verb) {
+  const total = job.total || 0;
+  const done = job.processed || 0;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  bulkProgressBarEl.style.width = `${pct}%`;
+  bulkProgressLabelEl.textContent = job.currentFile
+    ? `${verb} ${done + 1} of ${total}: ${job.currentFile}`
+    : `${verb} ${done} of ${total} (${pct}%)`;
+}
+
+const JOB_POLL_MS = 350;
+
+/** Starts a bulk job and polls it to completion, driving the progress bar. */
+async function runBulkJobWithProgress(request, { dryRun, verb }) {
+  const start = await api("/api/bulk-edit", {
+    method: "POST",
+    body: JSON.stringify({ ...request, dryRun })
+  });
+
+  setBulkBusy(true, verb);
+
+  try {
+    for (;;) {
+      const job = await api(`/api/bulk-edit/${encodeURIComponent(start.jobId)}`);
+      updateBulkProgress(job, verb);
+
+      if (job.status !== "running") {
+        if (job.status === "failed") {
+          throw new Error(job.error || "Bulk edit failed.");
+        }
+        return job;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, JOB_POLL_MS));
+    }
+  } finally {
+    setBulkBusy(false);
+  }
+}
+
+async function previewBulkEdit() {
+  const request = readBulkEditRequest();
+  const job = await runBulkJobWithProgress(request, { dryRun: true, verb: "Previewing" });
+
+  renderBulkResults(job);
+
+  const changeCount = job.summary?.changed || 0;
+  if (changeCount > 0) {
+    previewedEdit = request;
+    bulkApplyBtn.disabled = false;
+    setStatus(`Preview ready: ${changeCount} file${changeCount === 1 ? "" : "s"} would change. Review, then Apply.`);
+  } else {
+    previewedEdit = null;
+    bulkApplyBtn.disabled = true;
+    setStatus("Preview complete: nothing would change.");
+  }
+}
+
+async function applyBulkEdit() {
+  if (!previewedEdit) {
+    setStatus("Preview the change before applying.", true);
+    return;
+  }
+
+  const request = previewedEdit;
+  const fileCount = request.fileNames.length;
+  const action = request.mode === "delete"
+    ? `delete tag "${request.key}"`
+    : `set "${request.key}" to "${request.value}"`;
+
+  if (!confirm(`Write to the PBX now?\n\nThis will ${action} across ${fileCount} selected file${fileCount === 1 ? "" : "s"}.\n\nThis cannot be undone from this app.`)) {
+    setStatus("Bulk edit cancelled.");
+    return;
+  }
+
+  const job = await runBulkJobWithProgress(request, { dryRun: false, verb: "Applying to" });
+
+  renderBulkResults(job);
+  previewedEdit = null;
+  bulkApplyBtn.disabled = true;
+
+  const changed = job.summary?.changed || 0;
+  const errors = job.summary?.error || 0;
+  setStatus(
+    `Bulk edit applied to ${changed} file${changed === 1 ? "" : "s"}${errors ? `, ${errors} failed` : ""}.`,
+    errors > 0
+  );
+
+  await refreshFiles();
+  await refreshLogScopes();
+
+  // The open file may have just been rewritten underneath the editor.
+  if (currentFile && request.fileNames.includes(currentFile)) {
+    await loadFile(currentFile);
+  }
+}
+
+const LOG_ACTION_LABEL = {
+  "bulk-set": "Bulk set",
+  "bulk-delete": "Bulk delete",
+  "field-changed": "Changed field",
+  "field-added": "Added field",
+  "field-removed": "Removed field",
+  save: "Saved file",
+  create: "Created file"
+};
+
+function formatTimestamp(ts) {
+  if (!ts) {
+    return "";
+  }
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+async function refreshLogScopes() {
+  const data = await api("/api/logs");
+  logScopes = data.scopes || [];
+
+  const previous = logScopeSelect.value;
+  logScopeSelect.replaceChildren();
+
+  if (logScopes.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "(No logged servers yet)";
+    logScopeSelect.appendChild(opt);
+    logEntries = [];
+    renderLogEntries();
+    return;
+  }
+
+  for (const scope of logScopes) {
+    const opt = document.createElement("option");
+    opt.value = scope.key;
+    const when = scope.lastActivity ? ` - last ${formatTimestamp(scope.lastActivity)}` : "";
+    opt.textContent = `${scope.label} (${scope.entryCount})${when}`;
+    logScopeSelect.appendChild(opt);
+  }
+
+  // Prefer the server we are connected to, then whatever was selected before.
+  const preferred = [data.currentScopeKey, previous].find((key) => logScopes.some((s) => s.key === key));
+  logScopeSelect.value = preferred || logScopes[0].key;
+
+  await loadLogEntries();
+}
+
+async function loadLogEntries() {
+  const key = logScopeSelect.value;
+  if (!key) {
+    logEntries = [];
+    renderLogEntries();
+    return;
+  }
+
+  const data = await api(`/api/logs/${encodeURIComponent(key)}`);
+  logEntries = data.entries || [];
+  renderLogEntries();
+}
+
+function getFilteredLogEntries() {
+  const q = logSearchInput.value.trim().toLowerCase();
+  if (!q) {
+    return logEntries;
+  }
+
+  return logEntries.filter((entry) => {
+    const haystack = [
+      entry.file,
+      entry.station,
+      entry.tag,
+      entry.before,
+      entry.after,
+      LOG_ACTION_LABEL[entry.action] || entry.action
+    ].map((v) => String(v ?? "").toLowerCase());
+    return haystack.some((v) => v.includes(q));
+  });
+}
+
+function renderLogEntries() {
+  const rows = getFilteredLogEntries();
+  logResultsEl.replaceChildren();
+
+  const scope = logScopes.find((s) => s.key === logScopeSelect.value);
+  if (logEntries.length === 0) {
+    logMetaEl.textContent = scope
+      ? `No changes recorded yet for ${scope.label}.`
+      : "No log entries yet.";
+    return;
+  }
+
+  logMetaEl.textContent = `${rows.length} of ${logEntries.length} entr${logEntries.length === 1 ? "y" : "ies"}`
+    + (scope ? ` for ${scope.label}` : "");
+
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["When", "Action", "Phone", "File", "Tag", "Before", "After", "Result"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const entry of rows) {
+    const tr = document.createElement("tr");
+    tr.className = entry.status === "error" ? "bulk-row-error" : "bulk-row-changed";
+
+    const cells = [
+      formatTimestamp(entry.ts),
+      LOG_ACTION_LABEL[entry.action] || entry.action,
+      // Entries written before station tracking existed have no station field.
+      entry.station || "-",
+      entry.file || "",
+      entry.tag || "",
+      entry.before ?? (entry.action === "field-added" ? "(not set)" : ""),
+      entry.after ?? (entry.action === "bulk-delete" || entry.action === "field-removed" ? "(removed)" : ""),
+      entry.status === "error" ? (entry.error || "Error") : "OK"
+    ];
+
+    for (const text of cells) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+
+    tbody.appendChild(tr);
+  }
+
+  table.appendChild(tbody);
+  logResultsEl.appendChild(table);
+}
+
+function exportLogCsv() {
+  const rows = getFilteredLogEntries();
+  if (rows.length === 0) {
+    setStatus("Nothing to export.", true);
+    return;
+  }
+
+  const scope = logScopes.find((s) => s.key === logScopeSelect.value);
+  // Prefix a field starting with =,+,-,@ so spreadsheets do not treat it as a formula.
+  const cell = (v) => {
+    const s = String(v ?? "");
+    const safe = /^[=+\-@]/.test(s) ? `'${s}` : s;
+    return `"${safe.replace(/"/g, '""')}"`;
+  };
+
+  const header = ["When", "Action", "Phone", "File", "Tag", "Before", "After", "Result"];
+  const lines = [header.map(cell).join(",")];
+
+  for (const entry of rows) {
+    lines.push([
+      formatTimestamp(entry.ts),
+      LOG_ACTION_LABEL[entry.action] || entry.action,
+      entry.station || "",
+      entry.file || "",
+      entry.tag || "",
+      entry.before ?? "",
+      entry.after ?? "",
+      entry.status === "error" ? (entry.error || "Error") : "OK"
+    ].map(cell).join(","));
+  }
+
+  const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `pbx-change-log-${(scope?.label || "server").replace(/[^\w.-]+/g, "_")}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+
+  setStatus(`Exported ${rows.length} log entr${rows.length === 1 ? "y" : "ies"}.`);
+}
+
+async function clearCurrentLog() {
+  const key = logScopeSelect.value;
+  if (!key) {
+    setStatus("No log selected.", true);
+    return;
+  }
+
+  const scope = logScopes.find((s) => s.key === key);
+  const label = scope?.label || key;
+
+  if (!confirm(`Permanently delete the change log for "${label}"?\n\nThis removes ${scope?.entryCount || 0} recorded entries and cannot be undone.`)) {
+    return;
+  }
+
+  const data = await api(`/api/logs/${encodeURIComponent(key)}`, { method: "DELETE" });
+  await refreshLogScopes();
+  setStatus(`Cleared ${data.cleared} log entr${data.cleared === 1 ? "y" : "ies"} for ${label}.`);
+}
+
+connectForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+
+  const body = Object.fromEntries(new FormData(connectForm).entries());
+  if (!body.password) {
+    setStatus("Password is required to connect.", true);
+    return;
+  }
+
+  if (body.profileId) {
+    delete body.host;
+    delete body.port;
+    delete body.username;
+    delete body.remoteDir;
+  }
+
+  try {
+    const data = await api("/api/connect", {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+
+    if (data.connection?.profileId) {
+      serverSelect.value = data.connection.profileId;
+      fillFormFromServer(data.connection.profileId);
+    }
+
+    lastConnectionInfo = data.connection || null;
+    setConnectionCollapsed(true, data.connection || null);
+
+    setStatus(data.message || "Connected");
+    await refreshFiles();
+    // Switch the log viewer to the server we just connected to.
+    await refreshLogScopes();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+serverSelect.addEventListener("change", () => {
+  fillFormFromServer(serverSelect.value);
+});
+
+saveServerBtn.addEventListener("click", async () => {
+  try {
+    await saveServerProfile();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+deleteServerBtn.addEventListener("click", async () => {
+  try {
+    await deleteSelectedServer();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+async function handleDisconnectClick() {
+  try {
+    await disconnectFromServer();
+    currentFile = "";
+    fileListEl.innerHTML = "";
+    clearRows();
+    setBaseline("flat-profile", []);
+    filesCountEl.textContent = "0 files";
+    allFiles = [];
+    selectedFiles.clear();
+    onSelectionChanged();
+    lastConnectionInfo = null;
+    setConnectionCollapsed(false);
+    setStatus("Disconnected");
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+disconnectBtn.addEventListener("click", handleDisconnectClick);
+disconnectMiniBtn.addEventListener("click", handleDisconnectClick);
+
+expandConnectionBtn.addEventListener("click", () => {
+  setConnectionCollapsed(false, lastConnectionInfo);
+});
+
+collapseConnectionBtn.addEventListener("click", () => {
+  setConnectionCollapsed(true, lastConnectionInfo);
+});
+
+themeToggleBtn.addEventListener("click", () => {
+  applyTheme(currentTheme === "dark" ? "light" : "dark");
+});
+
+refreshBtn.addEventListener("click", async () => {
+  try {
+    await refreshFiles();
+    setStatus("List refreshed");
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+filesSearchInput.addEventListener("input", () => {
+  filesQuery = filesSearchInput.value || "";
+  renderFileList(getFilteredFiles());
+});
+
+selectAllBtn.addEventListener("click", () => {
+  // "Shown" = whatever the current search filter matches, not the whole list.
+  for (const file of getFilteredFiles()) {
+    selectedFiles.add(file.name);
+  }
+  renderFileList(getFilteredFiles());
+  onSelectionChanged();
+});
+
+selectNoneBtn.addEventListener("click", () => {
+  selectedFiles.clear();
+  renderFileList(getFilteredFiles());
+  onSelectionChanged();
+});
+
+for (const el of [bulkKeyInput, bulkValueInput, bulkAttrsInput]) {
+  el.addEventListener("input", invalidatePreview);
+}
+bulkModeSelect.addEventListener("change", () => {
+  // Value and attributes are meaningless for a delete.
+  const isDelete = bulkModeSelect.value === "delete";
+  bulkValueInput.disabled = isDelete;
+  bulkAttrsInput.disabled = isDelete;
+  invalidatePreview();
+});
+
+bulkPreviewBtn.addEventListener("click", async () => {
+  try {
+    await previewBulkEdit();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+bulkApplyBtn.addEventListener("click", async () => {
+  try {
+    await applyBulkEdit();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+logScopeSelect.addEventListener("change", async () => {
+  try {
+    await loadLogEntries();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+logSearchInput.addEventListener("input", renderLogEntries);
+
+logRefreshBtn.addEventListener("click", async () => {
+  try {
+    await refreshLogScopes();
+    setStatus("Change log refreshed.");
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+logExportBtn.addEventListener("click", exportLogCsv);
+
+logClearBtn.addEventListener("click", async () => {
+  try {
+    await clearCurrentLog();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+searchInput.addEventListener("input", () => {
+  searchQuery = searchInput.value || "";
+  applyRowVisibility();
+});
+
+hideEmptyBtn.addEventListener("click", () => {
+  hideEmpty = !hideEmpty;
+  applyRowVisibility();
+});
+
+function toggleShowAllFields() {
+  showAllFields = !showAllFields;
+  applyRowVisibility();
+}
+
+showAllTopBtn.addEventListener("click", toggleShowAllFields);
+showAllBottomBtn.addEventListener("click", toggleShowAllFields);
+
+addRowBtn.addEventListener("click", () => addRow());
+
+async function handleSaveClick() {
+  try {
+    await saveCurrentFile();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+async function handleCreateClick() {
+  try {
+    await createNewFile();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+saveBtn.addEventListener("click", handleSaveClick);
+saveTopBtn.addEventListener("click", handleSaveClick);
+
+createBtn.addEventListener("click", handleCreateClick);
+createTopBtn.addEventListener("click", handleCreateClick);
+
+resetBtn.addEventListener("click", resetEditorToBaseline);
+resetTopBtn.addEventListener("click", resetEditorToBaseline);
+
+// Ctrl/Cmd+S saves the open file. Worth having when the editor holds hundreds of
+// rows and the Save buttons have scrolled out of reach.
+document.addEventListener("keydown", (event) => {
+  if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") {
+    return;
+  }
+
+  event.preventDefault();
+
+  if (!fileNameInput.value.trim()) {
+    setStatus("Nothing to save - load or name a file first.", true);
+    return;
+  }
+
+  handleSaveClick();
+});
+
+loadTemplateBtn.addEventListener("click", async () => {
+  try {
+    await loadTemplateIntoEditor();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+saveTemplateBtn.addEventListener("click", async () => {
+  try {
+    await saveTemplate();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+(async function init() {
+  applyTheme(localStorage.getItem("pbx-theme") || "light");
+
+  try {
+    await refreshServers();
+    await refreshTemplates();
+
+    const data = await api("/api/status");
+    if (data.connected && data.connection) {
+      lastConnectionInfo = data.connection;
+      setConnectionCollapsed(true, data.connection);
+      setStatus(`Connected: ${data.connection.host} (${data.connection.remoteDir})`);
+      if (data.connection.profileId) {
+        serverSelect.value = data.connection.profileId;
+        fillFormFromServer(data.connection.profileId);
+      }
+      await refreshFiles();
+    } else {
+      setConnectionCollapsed(false);
+    }
+  } catch (_) {
+    // Ignore startup status errors.
+  }
+
+  // Logs are independent of the connection, so load them even when disconnected.
+  try {
+    await refreshLogScopes();
+  } catch (_) {
+    // Ignore log load errors at startup.
+  }
+})();
+

@@ -1,0 +1,16 @@
+node_modules
+npm-debug.log*
+
+# Runtime state lives on the /data volume, never baked into the image.
+# It holds saved server profiles and the change log.
+data
+
+# Not needed at runtime
+test
+README.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+.git
+.gitignore
+.claude

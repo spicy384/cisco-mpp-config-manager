@@ -1,0 +1,45 @@
+services:
+  pbx-manager:
+    build: .
+    image: pbx-mpp-config-manager
+    container_name: pbx-manager
+    restart: unless-stopped
+
+    # IMPORTANT: this app has no login of its own. Anyone who can reach this port
+    # can read your saved server profiles and change log, and can push config to
+    # every phone on the PBX. It is therefore bound to loopback only.
+    # To reach it from elsewhere, put it behind a reverse proxy that authenticates
+    # (see README), or change this to "<lan-ip>:3000:3000" if the network is trusted.
+    ports:
+      - "127.0.0.1:3000:3000"
+
+    environment:
+      PORT: 3000
+      DATA_DIR: /data
+      # Optional: point at a template file mounted into the container.
+      # DEFAULT_TEMPLATE_PATH: /data/default-template.xml
+      TZ: ${TZ:-UTC}
+
+    # Saved servers, templates and the change log persist here.
+    volumes:
+      - pbx-data:/data
+
+    # Run exactly one instance: the SFTP connection and in-flight bulk jobs are
+    # held in memory, so a second replica would not share them.
+    deploy:
+      replicas: 1
+
+    # Modest hardening; the app only needs outbound SFTP and its own port.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pbx-data:

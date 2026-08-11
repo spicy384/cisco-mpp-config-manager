@@ -173,31 +173,6 @@ as the fallback "Default Template". Every value in it is a **placeholder**:
 To make your own the default, drop it at `data/default-template.xml` (that directory is
 gitignored) or point `DEFAULT_TEMPLATE_PATH` at it. Either takes precedence over the example.
 
-## Tests
-```powershell
-npm test
-```
-Runs two suites (135 checks, no external test framework):
-- `test/unit.test.js` - pure helpers imported directly from `server.js`: bulk edit modes,
-  XML round-tripping, path-traversal rejection, log scope keying.
-- `test/e2e.test.js` - boots the real server and drives it over a real SFTP connection to an
-  in-memory mock PBX (`test/helpers/mock-sftp.js`). Covers preview-performs-no-writes,
-  attribute preservation, no-op skipping, progress reporting, and the change log.
-
-Run one suite with `npm run test:unit` or `npm run test:e2e`.
-
-The e2e suite backs up `data/` to the OS temp directory before running and restores it
-afterwards (including if it fails), so your saved servers and logs are never disturbed.
-
-### Trying the UI without a real PBX
-```powershell
-npm run mock-pbx
-```
-Starts a fake PBX over SFTP and prints its port. Connect the app to `127.0.0.1` on that port
-with `/tftpboot` and any username/password. It serves 8 config files with a deliberate 400ms
-delay per file so the bulk-edit progress bar is easy to watch. Files are in-memory only.
-Override with `MOCK_FILE_COUNT` and `MOCK_LATENCY_MS`.
-
 ## Notes
 - Passwords are not persisted; they are required at connect time.
 - Saved PBX server profiles are stored in `data/servers.json`.

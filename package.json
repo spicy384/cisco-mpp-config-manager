@@ -6,11 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js",
-    "test": "node test/run-all.js",
-    "test:unit": "node test/unit.test.js",
-    "test:e2e": "node test/e2e.test.js",
-    "mock-pbx": "node test/mock-pbx.js"
+    "dev": "node server.js"
   },
   "dependencies": {
     "express": "^4.21.2",

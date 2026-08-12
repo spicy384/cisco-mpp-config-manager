@@ -45,6 +45,7 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const { createAuth } = require("./auth-routes");
 const { resolveTlsOptions } = require("./tls-setup");
+const { quickSchema } = require("./public/quick-config");
 const authGuard = createAuth({ dataDir: DATA_DIR });
 
 // Auth endpoints are mounted first: they must be reachable while signed out.
@@ -186,16 +187,44 @@ function buildLogScope(conn) {
   };
 }
 
+// Tags whose values must never be written to the change log.
+const SENSITIVE_TAG = /passwd|password|passphrase|secret/i;
+const REDACTED = "(hidden)";
+
+function isSensitiveTag(tag) {
+  return Boolean(tag) && SENSITIVE_TAG.test(String(tag));
+}
+
 /**
- * `user` is stamped onto every entry here rather than at each construction site,
- * so no code path can record a change without saying who made it.
+ * Records that a password changed without recording what it changed to.
+ * Empty is left as-is so "cleared" is still distinguishable from "set", which
+ * is useful when auditing and reveals nothing.
+ */
+function redactSensitiveEntry(entry) {
+  if (!isSensitiveTag(entry.tag)) {
+    return entry;
+  }
+
+  return {
+    ...entry,
+    before: entry.before ? REDACTED : entry.before,
+    after: entry.after ? REDACTED : entry.after
+  };
+}
+
+/**
+ * `user` is stamped and secrets are redacted here rather than at each construction
+ * site, so no code path can record a change without saying who made it, or leak a
+ * password value into the log.
  */
 function appendLogEntries(scope, entries, user = "") {
   if (!scope || !Array.isArray(entries) || entries.length === 0) {
     return;
   }
 
-  const stamped = entries.map((entry) => ({ ...entry, user: entry.user || user || "" }));
+  const stamped = entries
+    .map(redactSensitiveEntry)
+    .map((entry) => ({ ...entry, user: entry.user || user || "" }));
 
   const log = loadChangeLog();
   const existing = log[scope.key];
@@ -274,9 +303,16 @@ function sanitizeServerProfile(input) {
   const username = String(input?.username || "").trim();
   const remoteDir = String(input?.remoteDir || "").trim();
   const port = Number(input?.port) || 22;
+  // Where speed dial and BLF buttons point, e.g. "pbx.example.com:5060".
+  // Optional: only the Quick editor needs it, and it says so when it is missing.
+  const sipServer = String(input?.sipServer || "").trim();
 
   if (!name || !host || !username || !remoteDir) {
     throw new Error("name, host, username, and remoteDir are required.");
+  }
+
+  if (sipServer && /[\s;@]/.test(sipServer)) {
+    throw new Error("SIP server must be a host or host:port, with no spaces, '@' or ';'.");
   }
 
   return {
@@ -285,7 +321,8 @@ function sanitizeServerProfile(input) {
     host,
     port,
     username,
-    remoteDir
+    remoteDir,
+    sipServer
   };
 }
 
@@ -648,7 +685,10 @@ function jobToJson(job) {
 }
 
 async function runBulkJob(job) {
-  const { fileNames, key, value, attributes, mode, dryRun, scope, remoteDir } = job.request;
+  const { fileNames, edits, dryRun, scope, remoteDir } = job.request;
+
+  // Legacy single-edit callers see the familiar fields; multi-edit callers read `changes`.
+  const singleEdit = edits.length === 1 ? edits[0] : null;
 
   for (const fileName of fileNames) {
     job.currentFile = fileName;
@@ -661,24 +701,51 @@ async function runBulkJob(job) {
 
       // Identifies the phone in results and logs; file names are MAC addresses.
       const station = findStationDisplayNameInEntries(entries);
-      const edit = applyBulkEdit(entries, { key, value, attributes, mode });
 
-      if (edit.matched === 0 && mode !== "set") {
-        job.results.push({ name: fileName, station, status: "missing", matched: 0, previousValues: [] });
+      // Apply every edit in turn, carrying the result forward.
+      let working = entries;
+      let totalMatched = 0;
+      let anyMissing = false;
+      const changes = [];
+
+      for (const edit of edits) {
+        const before = working;
+        const applied = applyBulkEdit(before, edit);
+        totalMatched += applied.matched;
+
+        if (applied.matched === 0 && edit.mode !== "set") {
+          anyMissing = true;
+          continue;
+        }
+
+        changes.push({
+          tag: edit.key,
+          before: (applied.previousValues || []).join(", "),
+          after: edit.mode === "delete" ? null : edit.value,
+          previousValues: applied.previousValues
+        });
+
+        working = applied.entries;
+      }
+
+      // Every edit was a no-op against a tag that does not exist.
+      if (changes.length === 0 && anyMissing) {
+        job.results.push({ name: fileName, station, status: "missing", matched: 0, previousValues: [], changes: [] });
         continue;
       }
 
       // Compare rebuilt-vs-rebuilt so a no-op edit never rewrites (and reformats) a file.
       const currentXml = entriesToXml(rootKey, entries);
-      const nextXml = entriesToXml(rootKey, edit.entries);
+      const nextXml = entriesToXml(rootKey, working);
 
       if (currentXml === nextXml) {
         job.results.push({
           name: fileName,
           station,
           status: "unchanged",
-          matched: edit.matched,
-          previousValues: edit.previousValues
+          matched: totalMatched,
+          previousValues: changes[0]?.previousValues || [],
+          changes
         });
         continue;
       }
@@ -688,7 +755,7 @@ async function runBulkJob(job) {
         setFileMetadataCacheEntry(buildCacheKey(fileName), {
           size: Buffer.byteLength(nextXml, "utf8"),
           modified: Date.now(),
-          stationDisplayName: findStationDisplayNameInEntries(edit.entries)
+          stationDisplayName: findStationDisplayNameInEntries(working)
         });
       }
 
@@ -696,9 +763,10 @@ async function runBulkJob(job) {
         name: fileName,
         station,
         status: "changed",
-        matched: edit.matched,
-        previousValues: edit.previousValues,
-        newValue: mode === "delete" ? null : value
+        matched: totalMatched,
+        previousValues: changes[0]?.previousValues || [],
+        newValue: singleEdit ? (singleEdit.mode === "delete" ? null : singleEdit.value) : null,
+        changes
       });
     } catch (error) {
       // One bad file must not abort the rest of the batch. The file could not be read,
@@ -718,19 +786,45 @@ async function runBulkJob(job) {
 
   // Only real writes are auditable events; a preview changed nothing.
   if (!dryRun) {
-    const logEntries = job.results
-      .filter((item) => item.status === "changed" || item.status === "error")
-      .map((item) => ({
-        ts: Date.now(),
-        action: mode === "delete" ? "bulk-delete" : "bulk-set",
-        file: item.name,
-        station: item.station || "",
-        tag: key,
-        before: (item.previousValues || []).join(", "),
-        after: item.status === "error" ? null : (mode === "delete" ? null : value),
-        status: item.status,
-        error: item.error || null
-      }));
+    const logEntries = [];
+
+    for (const item of job.results) {
+      if (item.status === "error") {
+        logEntries.push({
+          ts: Date.now(),
+          action: "bulk-set",
+          file: item.name,
+          station: item.station || "",
+          tag: singleEdit ? singleEdit.key : "(multiple)",
+          before: "",
+          after: null,
+          status: "error",
+          error: item.error || null
+        });
+        continue;
+      }
+
+      if (item.status !== "changed") {
+        continue;
+      }
+
+      // One log row per tag actually changed, so a Quick action that writes two
+      // tags is recorded as two auditable changes rather than one vague entry.
+      for (const change of item.changes || []) {
+        const edit = edits.find((e) => e.key === change.tag);
+        logEntries.push({
+          ts: Date.now(),
+          action: edit && edit.mode === "delete" ? "bulk-delete" : "bulk-set",
+          file: item.name,
+          station: item.station || "",
+          tag: change.tag,
+          before: change.before,
+          after: change.after,
+          status: "changed",
+          error: null
+        });
+      }
+    }
 
     appendLogEntries(scope, logEntries, job.request.user);
   }
@@ -746,33 +840,54 @@ app.post("/api/bulk-edit", (req, res) => {
       return res.status(409).json({ error: "A bulk edit is already running. Wait for it to finish." });
     }
 
-    const { key, value, attributes, mode, dryRun } = req.body || {};
-    const targetKey = String(key || "").trim();
-    const editMode = String(mode || "set");
+    const { dryRun } = req.body || {};
 
-    if (!targetKey) {
-      return res.status(400).json({ error: "Tag name is required." });
-    }
-
-    if (!BULK_EDIT_MODES.has(editMode)) {
-      return res.status(400).json({ error: `Unknown mode: ${editMode}` });
-    }
+    // Two request shapes: a single tag edit (the Bulk Edit panel), or a list of
+    // them (a Quick action, which usually writes more than one tag).
+    const rawEdits = Array.isArray(req.body?.edits) && req.body.edits.length > 0
+      ? req.body.edits
+      : [{ key: req.body?.key, value: req.body?.value, attributes: req.body?.attributes, mode: req.body?.mode }];
 
     if (!Array.isArray(req.body?.fileNames) || req.body.fileNames.length === 0) {
       return res.status(400).json({ error: "Select at least one file." });
     }
 
+    const edits = [];
+    for (const raw of rawEdits) {
+      const targetKey = String(raw?.key || "").trim();
+      const editMode = String(raw?.mode || "set");
+
+      if (!targetKey) {
+        return res.status(400).json({ error: "Tag name is required." });
+      }
+      if (!BULK_EDIT_MODES.has(editMode)) {
+        return res.status(400).json({ error: `Unknown mode: ${editMode}` });
+      }
+
+      edits.push({
+        key: targetKey,
+        mode: editMode,
+        value: editMode === "delete" ? "" : (raw?.value == null ? "" : String(raw.value)),
+        attributes: normalizeAttributeOverride(raw?.attributes)
+      });
+    }
+
+    const duplicate = edits.map((e) => e.key).find((k, i, all) => all.indexOf(k) !== i);
+    if (duplicate) {
+      return res.status(400).json({ error: `The same tag appears twice in one request: ${duplicate}` });
+    }
+
     const fileNames = req.body.fileNames.map((name) => sanitizeFileName(name));
-    const attributeOverride = normalizeAttributeOverride(attributes);
-    const newValue = editMode === "delete" ? "" : (value == null ? "" : String(value));
     const isDryRun = dryRun !== false;
+    const primary = edits[0];
 
     const job = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       status: "running",
       dryRun: isDryRun,
-      key: targetKey,
-      mode: editMode,
+      key: primary.key,
+      mode: primary.mode,
+      editCount: edits.length,
       total: fileNames.length,
       processed: 0,
       currentFile: null,
@@ -782,10 +897,7 @@ app.post("/api/bulk-edit", (req, res) => {
       error: null,
       request: {
         fileNames,
-        key: targetKey,
-        value: newValue,
-        attributes: attributeOverride,
-        mode: editMode,
+        edits,
         dryRun: isDryRun,
         remoteDir: connection.remoteDir,
         scope: buildLogScope(connection),
@@ -1039,7 +1151,9 @@ app.post("/api/connect", async (req, res) => {
       username: target.username,
       remoteDir: target.remoteDir,
       profileId: target.id || null,
-      profileName: target.name || null
+      profileName: target.name || null,
+      // Used by the Quick editor when building speed dial and BLF targets.
+      sipServer: target.sipServer || ""
     };
 
     return res.json({
@@ -1060,6 +1174,12 @@ app.post("/api/connect", async (req, res) => {
 
 app.get("/api/status", (req, res) => {
   res.json({ connected: Boolean(connection), connection });
+});
+
+// The browser builds its Quick editor forms from this, so the recipes stay
+// defined in one place rather than duplicated in the UI.
+app.get("/api/quick/schema", (req, res) => {
+  res.json(quickSchema());
 });
 
 app.get("/api/files", async (req, res) => {
@@ -1331,6 +1451,8 @@ module.exports = {
   buildLogScope,
   buildSaveLogEntries,
   diffEntriesForLog,
+  isSensitiveTag,
+  redactSensitiveEntry,
   xmlToEntries,
   BULK_EDIT_MODES
 };

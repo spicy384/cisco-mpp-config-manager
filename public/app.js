@@ -57,6 +57,7 @@ const logResultsEl = document.getElementById("log-results");
 
 const serverSelect = document.getElementById("server-select");
 const serverNameInput = document.getElementById("server-name");
+const sipServerInput = document.getElementById("sip-server");
 const saveServerBtn = document.getElementById("save-server-btn");
 const deleteServerBtn = document.getElementById("delete-server-btn");
 
@@ -470,6 +471,7 @@ function fillFormFromServer(serverId) {
   connectForm.elements.port.value = server.port || 22;
   connectForm.elements.username.value = server.username || "";
   connectForm.elements.remoteDir.value = server.remoteDir || "";
+  sipServerInput.value = server.sipServer || "";
 }
 
 async function refreshFiles() {
@@ -505,6 +507,14 @@ async function loadFile(name) {
   setBaseline(data.rootKey || "flat-profile", data.entries || []);
 
   renderFileList(getFilteredFiles());
+
+  // Quick view reads from the editor rows, so refresh it whenever they change.
+  if (quickSchemaData && !panelQuick.hidden) {
+    renderQuickButtons();
+    renderQuickSettings();
+  }
+  updateQuickScopeHints();
+
   setStatus(`Loaded ${data.fileName}`);
 }
 
@@ -637,7 +647,8 @@ async function saveServerProfile() {
     host,
     port: Number(port) || 22,
     username,
-    remoteDir
+    remoteDir,
+    sipServer: sipServerInput.value.trim()
   };
 
   const data = await api("/api/servers", {
@@ -670,6 +681,9 @@ function disconnectFromServer() {
 function onSelectionChanged() {
   const count = selectedFiles.size;
   bulkSelectionCountEl.textContent = `${count} file${count === 1 ? "" : "s"} selected`;
+  if (quickSchemaData) {
+    updateQuickScopeHints();
+  }
   invalidatePreview();
 }
 
@@ -865,9 +879,13 @@ async function applyBulkEdit() {
 
   const request = previewedEdit;
   const fileCount = request.fileNames.length;
-  const action = request.mode === "delete"
-    ? `delete tag "${request.key}"`
-    : `set "${request.key}" to "${request.value}"`;
+
+  // A Quick action sends several tags at once, so describe them all.
+  const action = request.edits
+    ? `${request.description || "apply this change"} (${request.edits.map((e) => e.key).join(", ")})`
+    : (request.mode === "delete"
+      ? `delete tag "${request.key}"`
+      : `set "${request.key}" to "${request.value}"`);
 
   if (!confirm(`Write to the PBX now?\n\nThis will ${action} across ${fileCount} selected file${fileCount === 1 ? "" : "s"}.\n\nThis cannot be undone from this app.`)) {
     setStatus("Bulk edit cancelled.");
@@ -1359,6 +1377,330 @@ saveTemplateBtn.addEventListener("click", async () => {
 });
 
 // ===========================================================================
+// Quick editor
+// ===========================================================================
+const tabQuick = document.getElementById("tab-quick");
+const tabAdvanced = document.getElementById("tab-advanced");
+const panelQuick = document.getElementById("panel-quick");
+const panelAdvanced = document.getElementById("panel-advanced");
+const quickButtonsEl = document.getElementById("quick-buttons");
+const quickSettingsEl = document.getElementById("quick-settings");
+const quickWarningEl = document.getElementById("quick-warning");
+const quickForm = document.getElementById("quick-button-form");
+const quickButtonTitle = document.getElementById("quick-button-title");
+const quickTypeSelect = document.getElementById("quick-button-type");
+const quickFieldsEl = document.getElementById("quick-button-fields");
+const quickPreviewEl = document.getElementById("quick-button-preview");
+
+let quickSchemaData = null;
+let quickEditingIndex = null;
+// Current values for the button form, keyed by field name.
+let quickFieldValues = {};
+
+/** "the open phone" vs "the selected phones". */
+function quickScope() {
+  return document.querySelector('input[name="quick-scope"]:checked')?.value || "file";
+}
+
+function sipServerForQuick() {
+  // The saved profile is the source of truth; fall back to what is typed in the form
+  // so it works before the profile has been saved.
+  return (lastConnectionInfo?.sipServer || sipServerInput.value || "").trim();
+}
+
+/** Entries as they currently stand in the Advanced table. */
+function readEntriesRaw() {
+  return [...entriesBody.querySelectorAll("tr")].map((tr) => ({
+    key: tr.querySelector(".tag").value.trim(),
+    value: tr.querySelector(".value").value
+  })).filter((e) => e.key);
+}
+
+function readLineKeyFromEditor(index) {
+  return QuickConfig.readLineKey(readEntriesRaw(), index);
+}
+
+function renderQuickButtons() {
+  if (!quickSchemaData) return;
+  quickButtonsEl.replaceChildren();
+
+  for (let i = 1; i <= quickSchemaData.lineKeyCount; i += 1) {
+    const state = readLineKeyFromEditor(i);
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "quick-button" + (state && state.type !== "unused" ? " is-set" : "");
+    if (quickEditingIndex === i) card.classList.add("is-editing");
+
+    const num = document.createElement("span");
+    num.className = "quick-button-num";
+    num.textContent = String(i);
+
+    const desc = document.createElement("span");
+    desc.className = "quick-button-desc";
+    desc.textContent = QuickConfig.describeLineKey(state);
+
+    const nameEl = document.createElement("span");
+    nameEl.className = "quick-button-name";
+    nameEl.textContent = state?.name || "";
+
+    card.append(num, desc, nameEl);
+    card.addEventListener("click", () => openQuickButton(i));
+    quickButtonsEl.appendChild(card);
+  }
+}
+
+function openQuickButton(index) {
+  quickEditingIndex = index;
+  quickForm.hidden = false;
+  quickButtonTitle.textContent = `Button ${index}`;
+
+  const state = readLineKeyFromEditor(index) || { type: "unused" };
+  quickTypeSelect.value = state.type;
+  // Pre-fill from the current config, so what the form shows is what gets written.
+  quickFieldValues = {
+    target: state.target || "",
+    name: state.name || "",
+    password: state.password || "",
+    shortName: state.shortName || "",
+    custom: state.custom || ""
+  };
+
+  renderQuickFields();
+  renderQuickButtons();
+  quickForm.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+/** Each button type needs different inputs, so the form is built from the schema. */
+function renderQuickFields() {
+  const def = quickSchemaData?.lineKeyTypes.find((t) => t.id === quickTypeSelect.value);
+  quickFieldsEl.replaceChildren();
+
+  for (const field of def?.fields || []) {
+    const label = document.createElement("label");
+    label.textContent = def.labels[field] || field;
+
+    const input = document.createElement("input");
+    input.value = quickFieldValues[field] || "";
+    input.placeholder = def.placeholders[field] || "";
+    if (field === "custom") {
+      input.className = "mono";
+    }
+    input.addEventListener("input", () => {
+      quickFieldValues[field] = input.value;
+      updateQuickPreview();
+    });
+
+    label.appendChild(input);
+    quickFieldsEl.appendChild(label);
+  }
+
+  updateQuickPreview();
+}
+
+/** Shows exactly what will be written, so nothing is a surprise. */
+function updateQuickPreview() {
+  try {
+    const produced = QuickConfig.buildLineKey({
+      index: quickEditingIndex,
+      type: quickTypeSelect.value,
+      server: sipServerForQuick(),
+      ...quickFieldValues
+    });
+    quickPreviewEl.textContent = produced.map((p) => `${p.key} = ${p.value || "(empty)"}`).join("   |   ");
+    quickPreviewEl.classList.remove("is-error");
+  } catch (error) {
+    quickPreviewEl.textContent = error.message;
+    quickPreviewEl.classList.add("is-error");
+  }
+}
+
+function renderQuickSettings() {
+  if (!quickSchemaData) return;
+  quickSettingsEl.replaceChildren();
+  const entries = readEntriesRaw();
+
+  for (const setting of quickSchemaData.settings) {
+    const row = document.createElement("div");
+    row.className = "quick-setting";
+
+    const label = document.createElement("label");
+    label.textContent = setting.label;
+    const input = document.createElement("input");
+    input.placeholder = setting.placeholder || "";
+    input.value = QuickConfig.readSetting(setting.id, entries);
+    label.appendChild(input);
+
+    const hint = document.createElement("p");
+    hint.className = "quick-setting-hint";
+    hint.textContent = setting.hint || "";
+
+    const apply = document.createElement("button");
+    apply.type = "button";
+    apply.textContent = "Apply";
+    apply.addEventListener("click", () => applyQuickSetting(setting.id, input.value));
+
+    row.append(label, apply);
+    quickSettingsEl.append(row, hint);
+  }
+}
+
+// Building settings and line keys both live in quick-config.js, shared with the server.
+
+/** Writes produced entries into the Advanced table so Save/Reset behave normally. */
+function mergeIntoEditor(produced) {
+  for (const item of produced) {
+    const row = [...entriesBody.querySelectorAll("tr")]
+      .find((tr) => tr.querySelector(".tag").value.trim() === item.key);
+
+    if (row) {
+      row.querySelector(".value").value = item.value;
+      if (item.attributes) {
+        const attrsInput = row.querySelector(".attrs");
+        let existing = {};
+        try { existing = JSON.parse(attrsInput.value || "{}"); } catch { existing = {}; }
+        attrsInput.value = JSON.stringify({ ...existing, ...item.attributes });
+      }
+      row.classList.remove("deleted");
+    } else {
+      addRow({ key: item.key, value: item.value, attributes: item.attributes || {} });
+    }
+  }
+  applyRowVisibility();
+}
+
+async function applyQuickChange(produced, description) {
+  if (quickScope() === "bulk") {
+    if (selectedFiles.size === 0) {
+      setStatus("Tick some phones in the XML Files list first.", true);
+      return;
+    }
+
+    previewedEdit = {
+      fileNames: [...selectedFiles],
+      edits: produced.map((p) => ({ key: p.key, value: p.value, attributes: p.attributes || null, mode: "set" })),
+      description
+    };
+
+    // Route through the same preview-then-confirm path as a manual bulk edit.
+    const job = await runBulkJobWithProgress(previewedEdit, { dryRun: true, verb: "Previewing" });
+    renderBulkResults(job);
+
+    const changeCount = job.summary?.changed || 0;
+    if (changeCount === 0) {
+      previewedEdit = null;
+      bulkApplyBtn.disabled = true;
+      setStatus(`${description}: every selected phone already matches.`);
+      return;
+    }
+
+    bulkApplyBtn.disabled = false;
+    setStatus(`${description}: ${changeCount} phone${changeCount === 1 ? "" : "s"} would change. Review below, then Apply to PBX.`);
+    document.getElementById("bulk-results").scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+
+  if (!currentFile && !fileNameInput.value.trim()) {
+    setStatus("Open a phone from the list first, or give the new file a name.", true);
+    return;
+  }
+
+  mergeIntoEditor(produced);
+  renderQuickButtons();
+  setStatus(`${description} set. Not written yet - press Save / Upload.`);
+}
+
+function applyQuickSetting(id, value) {
+  try {
+    const produced = QuickConfig.buildSetting(id, value);
+    const label = quickSchemaData.settings.find((s) => s.id === id)?.label || id;
+    applyQuickChange(produced, label).catch((e) => setStatus(e.message, true));
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+document.getElementById("quick-button-apply").addEventListener("click", () => {
+  try {
+    const produced = QuickConfig.buildLineKey({
+      index: quickEditingIndex,
+      type: quickTypeSelect.value,
+      server: sipServerForQuick(),
+      ...quickFieldValues
+    });
+    applyQuickChange(produced, `Button ${quickEditingIndex}`).catch((e) => setStatus(e.message, true));
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+document.getElementById("quick-button-close").addEventListener("click", () => {
+  quickForm.hidden = true;
+  quickEditingIndex = null;
+  renderQuickButtons();
+});
+
+// Changing the type changes which fields exist, so rebuild the form.
+quickTypeSelect.addEventListener("change", renderQuickFields);
+
+for (const radio of document.querySelectorAll('input[name="quick-scope"]')) {
+  radio.addEventListener("change", updateQuickScopeHints);
+}
+
+function updateQuickScopeHints() {
+  const bulk = quickScope() === "bulk";
+  document.getElementById("quick-scope-file-label").textContent =
+    currentFile ? `the open phone (${currentFile})` : "the open phone";
+  document.getElementById("quick-scope-bulk-label").textContent =
+    `the selected phones (${selectedFiles.size})`;
+
+  const problems = [];
+  if (bulk && selectedFiles.size === 0) {
+    problems.push("No phones are ticked in the XML Files list.");
+  }
+  if (!sipServerForQuick()) {
+    problems.push("No SIP server is set on this PBX profile, so speed dial and BLF buttons cannot be built.");
+  }
+
+  quickWarningEl.textContent = problems.join(" ");
+  quickWarningEl.hidden = problems.length === 0;
+}
+
+function showTab(which) {
+  const quick = which === "quick";
+  tabQuick.classList.toggle("is-active", quick);
+  tabAdvanced.classList.toggle("is-active", !quick);
+  tabQuick.setAttribute("aria-selected", String(quick));
+  tabAdvanced.setAttribute("aria-selected", String(!quick));
+  panelQuick.hidden = !quick;
+  panelAdvanced.hidden = quick;
+
+  if (quick) {
+    renderQuickButtons();
+    renderQuickSettings();
+    updateQuickScopeHints();
+  }
+}
+
+tabQuick.addEventListener("click", () => showTab("quick"));
+tabAdvanced.addEventListener("click", () => showTab("advanced"));
+
+async function loadQuickSchema() {
+  quickSchemaData = await api("/api/quick/schema");
+
+  quickTypeSelect.replaceChildren();
+  for (const type of quickSchemaData.lineKeyTypes) {
+    const opt = document.createElement("option");
+    opt.value = type.id;
+    opt.textContent = type.label;
+    quickTypeSelect.appendChild(opt);
+  }
+
+  renderQuickButtons();
+  renderQuickSettings();
+  updateQuickScopeHints();
+}
+
+// ===========================================================================
 // Authentication
 // ===========================================================================
 const authOverlay = document.getElementById("auth-overlay");
@@ -1782,6 +2124,7 @@ async function onSignedIn() {
   try {
     await refreshServers();
     await refreshTemplates();
+    await loadQuickSchema();
 
     const data = await api("/api/status");
     if (data.connected && data.connection) {

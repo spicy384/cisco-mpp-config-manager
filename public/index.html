@@ -152,6 +152,9 @@
         </div>
 
         <label>Remote XML Directory <input name="remoteDir" placeholder="/tftpboot" /></label>
+        <label>SIP Server for speed dial / BLF (optional)
+          <input id="sip-server" placeholder="pbx.example.com:5060" />
+        </label>
         <label>Password (required to connect) <input name="password" type="password" required /></label>
 
         <div class="actions">
@@ -203,6 +206,58 @@
           </label>
         </div>
 
+        <div class="tabs" role="tablist">
+          <button id="tab-quick" class="tab is-active" type="button" role="tab" aria-selected="true">Quick</button>
+          <button id="tab-advanced" class="tab" type="button" role="tab" aria-selected="false">Advanced</button>
+        </div>
+
+        <!-- Quick: task-oriented, no tag syntax required -->
+        <div id="panel-quick" class="tab-panel">
+          <div class="quick-scope">
+            <span class="quick-scope-label">Apply changes to</span>
+            <label class="radio">
+              <input type="radio" name="quick-scope" value="file" checked />
+              <span id="quick-scope-file-label">the open phone</span>
+            </label>
+            <label class="radio">
+              <input type="radio" name="quick-scope" value="bulk" />
+              <span id="quick-scope-bulk-label">the selected phones</span>
+            </label>
+          </div>
+
+          <p id="quick-warning" class="quick-warning" hidden></p>
+
+          <h3 class="quick-heading">Lines and Buttons</h3>
+          <p class="bulk-hint">
+            Pick a key to set what it does - a registered line, a speed dial, a BLF, or
+            nothing at all. The app writes the tags and values for you.
+          </p>
+          <div id="quick-buttons" class="quick-buttons"></div>
+
+          <div id="quick-button-form" class="quick-form" hidden>
+            <div class="quick-form-head">
+              <strong id="quick-button-title">Button</strong>
+              <button type="button" id="quick-button-close" class="secondary small">Close</button>
+            </div>
+            <div class="quick-form-grid">
+              <label>Function
+                <select id="quick-button-type"></select>
+              </label>
+              <!-- The remaining fields are built from the schema, since each type needs different ones. -->
+              <div id="quick-button-fields" class="quick-form-fields"></div>
+            </div>
+            <p class="quick-preview">Will write: <code id="quick-button-preview">-</code></p>
+            <div class="actions">
+              <button type="button" id="quick-button-apply">Apply</button>
+            </div>
+          </div>
+
+          <h3 class="quick-heading">Settings</h3>
+          <div id="quick-settings" class="quick-settings"></div>
+        </div>
+
+        <!-- Advanced: the original raw tag editor -->
+        <div id="panel-advanced" class="tab-panel" hidden>
         <div class="toolbar">
           <button id="save-top-btn" type="button">Save / Upload</button>
           <button id="create-top-btn" type="button" class="secondary">Create New</button>
@@ -253,6 +308,7 @@
           <button id="create-btn" type="button" class="secondary">Create New</button>
           <button id="reset-btn" type="button" class="secondary">Reset</button>
           <button id="show-all-bottom-btn" type="button" class="secondary">Show All Fields</button>
+        </div>
         </div>
       </div>
     </section>
@@ -394,6 +450,8 @@
     </tr>
   </template>
 
+  <!-- Shared with the server: the live preview and what gets written cannot disagree. -->
+  <script src="/quick-config.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

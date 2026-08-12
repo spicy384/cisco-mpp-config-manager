@@ -10,6 +10,8 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
 - Can run behind an authentication reverse proxy instead (Authelia, Authentik, oauth2-proxy)
 
 **Editing**
+- Quick editor for everyday changes - set a line, speed dial, BLF or wallpaper without
+  knowing a single tag name - with the full tag editor still there as **Advanced**
 - Save multiple PBX server profiles (host/port/user/remote dir) and connect using only a password
 - File list led by `Station_Display_Name`, since config file names are MAC addresses
 - Open and edit XML as tag/value/attribute rows, with a sticky header for large configs
@@ -22,6 +24,63 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
 - Bulk edit one tag across many config files at once, preview-first, with live progress
 - Per-server change log of every write, showing field-level before and after, kept between
   connections and exportable to CSV
+
+## Quick editor
+The editor has two tabs. **Quick** covers the changes you make most often without needing to
+know tag names or value syntax. **Advanced** is the original tag/value/attribute table,
+unchanged, for anything Quick does not cover.
+
+Everything Quick writes can be applied to **the open phone** or to **the phones ticked in the
+XML Files list**. Bulk changes go through the same preview-then-confirm flow as
+[Bulk Edit](#bulk-edit), so you always see a per-phone diff before anything is written.
+
+### Lines and Buttons
+Pick one of the 16 keys and choose what it does. For example, setting button 6 to
+**BLF + speed dial + call pickup** for extension `1001` named `IT Helpdesk` writes:
+
+```xml
+<Extension_6_>Disabled</Extension_6_>
+<Extended_Function_6_>fnc=blf+sd+cp;sub=1001@srv1.pbx.example.com:5060;nme=IT Helpdesk</Extended_Function_6_>
+```
+
+| Type | What it writes |
+|---|---|
+| **Line** | `Extension_N_`, `User_ID_N_`, `Display_Name_N_`, `Password_N_`, `Short_Name_N_` |
+| **Speed dial** | `fnc=sd;ext=<ext>@<server>;nme=<name>` |
+| **BLF** | `fnc=blf;sub=<ext>@<server>;nme=<name>` |
+| **BLF + speed dial + call pickup** | `fnc=blf+sd+cp;sub=<ext>@<server>;nme=<name>` |
+| **Custom** | Your own `fnc=` string, with the surrounding tags handled for you |
+| **Unused** | Clears the key |
+
+Setting a **Line** asks for the extension, display name, SIP password and short name, and
+writes all five tags with the right attributes. Assigning any other function sets
+`Extension_N_` to `Disabled`, because a key cannot both register a line and carry an
+extended function.
+
+The `@server` part comes from **SIP Server for speed dial / BLF** on the saved PBX profile.
+Without it, Quick refuses to build a speed dial or BLF rather than writing a broken target.
+
+Only syntax confirmed against real configuration is offered as a named type. Anything else -
+park, DND, ACD and so on - goes through **Custom**, where you supply the `fnc=` string and the
+app still handles `Extension_N_` and the tag plumbing.
+
+Each key shows what it is currently set to, read back out of the config, and the form is
+pre-filled from it. Before you apply, the editor shows exactly which tags and values it will
+write.
+
+### Settings
+| Setting | Tags written |
+|---|---|
+| Station display name | `Station_Display_Name` |
+| Voicemail number | `Voice_Mail_Number` |
+| Time zone | `Time_Zone` |
+| NTP server | `Primary_NTP_Server` |
+| Admin password | `Admin_Passwd` (`ua="rw"`) |
+| Wallpaper | `Phone_Background` = `Download Picture` and `Picture_Download_URL` |
+
+> Quick changes update the editor but are **not written to the PBX until you press
+> Save / Upload** (or, for a bulk change, Apply to PBX). That keeps one save path, so the
+> change log and Reset behave exactly as they do for a manual edit.
 
 ## Bulk Edit
 Change a single setting across all (or selected) phone configs without opening each file.
@@ -82,6 +141,11 @@ fields that moved rather than just "the file was saved":
 
 The **User** column is the signed-in account that made the change. Entries written before
 authentication was added show `-`.
+
+**Passwords are never recorded.** Any tag whose name contains `passwd`, `password`,
+`passphrase` or `secret` is logged as changed with its value replaced by `(hidden)`, so the
+log still tells you a SIP or admin password was altered, by whom and when, without storing
+it. Clearing one stays visibly empty, so "set" and "cleared" remain distinguishable.
 
 The **Phone** column is the file's `Station_Display_Name`, since config file names are MAC
 addresses. It records the name as it was *before* the change, so a row that renames a phone
@@ -392,7 +456,10 @@ gitignored) or point `DEFAULT_TEMPLATE_PATH` at it. Either takes precedence over
 
 ## Notes
 - **SFTP passwords are never persisted** - you type them at connect time. Only the profile
-  (host, port, username, remote directory) is saved.
+  (host, port, username, remote directory and SIP server) is saved.
+- Phone configs contain SIP and admin passwords in plain text; that is how Cisco MPP
+  provisioning works. The change log redacts them, but the config files themselves and
+  `data/templates.json` do not.
 - XML is rebuilt on save, so formatting and comments may differ from the source file. Bulk
   edit only rewrites files it actually changes, so unaffected files are left untouched.
 - The **SFTP connection is shared**: once someone connects, any signed-in user works through

@@ -112,6 +112,15 @@ docker compose up -d --build
 
 Then browse to <http://localhost:3000> **on the management server itself**.
 
+That root compose file is the simple case: plain HTTP on loopback, reached on the server or
+through an SSH tunnel. [`deploy/`](deploy) has ready-made alternatives:
+
+| Setup | Use when | HTTPS handled by |
+|---|---|---|
+| `docker-compose.yml` (here) | You reach it on the server, or over an SSH tunnel | Nothing - plain HTTP on loopback |
+| [`deploy/caddy/`](deploy/caddy) | You have a domain and this host is reachable on 80/443 | Caddy, automatic Let's Encrypt |
+| [`deploy/external-proxy/`](deploy/external-proxy) | Your proxy runs on **another host** | The proxy for browsers, the app's own certificate for the hop to it |
+
 ### Read this before exposing it
 The app requires a sign-in with optional two-factor (see
 [Accounts and two-factor authentication](#accounts-and-two-factor-authentication)), but it
@@ -257,6 +266,12 @@ There is no ACME client built in, and for the usual setup you do not want one:
   from the internet on port 80/443 at the public name. An internal PBX tool normally is not.
 - **It would buy nothing on the proxy hop.** Proxies do not verify upstream certificates, so
   a trusted certificate is no more protective there than the generated self-signed one.
+
+**If you want Let's Encrypt without an existing proxy**, use
+[`deploy/caddy/`](deploy/caddy): Caddy runs alongside the app on the same host, obtains and
+renews the certificate automatically, and proxies to the app over an internal Docker network
+so nothing but Caddy is exposed. That needs a real domain pointing at the host and inbound
+TCP 80 and 443.
 
 If you do want a real certificate on the app itself - for example to reach it directly by
 hostname without warnings - obtain it with any ACME client that supports **DNS-01** (certbot,

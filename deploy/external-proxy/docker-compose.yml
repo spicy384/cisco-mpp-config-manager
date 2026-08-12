@@ -1,0 +1,62 @@
+# PBX MPP Config Manager behind a reverse proxy running on a DIFFERENT host
+# (for example Nginx Proxy Manager on another LAN).
+#
+# Because the proxy is elsewhere, the hop from proxy to app crosses the network.
+# The app therefore serves HTTPS itself using a self-signed certificate, so
+# passwords, TOTP codes and session cookies are not readable in transit.
+#
+#   cp .env.example .env     # set BIND_IP and TLS_HOSTS
+#   docker compose up -d
+#
+# Then point the proxy at https://<BIND_IP>:3000 and firewall that port so only
+# the proxy's address can reach it.
+
+services:
+  pbx-manager:
+    build:
+      context: ../..
+    image: pbx-mpp-config-manager
+    container_name: pbx-manager
+    restart: unless-stopped
+
+    # Bound to one LAN address rather than 0.0.0.0, so it is not offered on every
+    # interface. Restrict it further with a host firewall rule allowing only the
+    # proxy's IP.
+    ports:
+      - "${BIND_IP:?set BIND_IP in .env}:3000:3000"
+
+    environment:
+      PORT: 3000
+      DATA_DIR: /data
+      TZ: ${TZ:-UTC}
+
+      # Serve HTTPS with a self-signed certificate generated into /data/tls.
+      # Reverse proxies do not verify upstream certificates, so this is accepted;
+      # it exists to encrypt the hop, not to prove identity.
+      TLS_ENABLED: "true"
+      TLS_HOSTS: ${TLS_HOSTS:?set TLS_HOSTS in .env}
+
+      # The browser reaches the proxy over HTTPS, so the cookie must be Secure.
+      COOKIE_SECURE: "true"
+
+      # Only if the proxy itself authenticates (Authelia, Authentik) AND strips
+      # this header from client requests. Leave off for plain TLS proxying.
+      # TRUST_PROXY_AUTH: "true"
+      # PROXY_USER_HEADER: remote-user
+
+    volumes:
+      - pbx-data:/data
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pbx-data:

@@ -137,7 +137,7 @@ fields that moved rather than just "the file was saved":
 |---|---|---|---|---|---|---|
 | alice | Changed field | Front Desk - 7001 | `spa001.xml` | `Voice_Mail_Number` | `*97` | `*555` |
 | alice | Added field | Front Desk - 7001 | `spa001.xml` | `Time_Zone` | (not set) | `GMT+10:00` |
-| bob | Removed field | Kitchen - 7002 | `spa002.xml` | `Admin_Passwd` | `secret` | (removed) |
+| bob | Removed field | Kitchen - 7002 | `spa002.xml` | `Admin_Passwd` | `(hidden)` | (removed) |
 
 The **User** column is the signed-in account that made the change. Entries written before
 authentication was added show `-`.
@@ -457,6 +457,9 @@ gitignored) or point `DEFAULT_TEMPLATE_PATH` at it. Either takes precedence over
 ## Notes
 - **SFTP passwords are never persisted** - you type them at connect time. Only the profile
   (host, port, username, remote directory and SIP server) is saved.
+- **Values are preserved exactly as written.** Leading zeros, trailing decimal zeros and
+  the like survive unchanged, so an extension of `0903` stays `0903` rather than becoming
+  `903`.
 - Phone configs contain SIP and admin passwords in plain text; that is how Cisco MPP
   provisioning works. The change log redacts them, but the config files themselves and
   `data/templates.json` do not.

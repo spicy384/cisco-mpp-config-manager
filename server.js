@@ -57,7 +57,12 @@ app.use("/api", authGuard.requireAuth);
 const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
-  textNodeName: "#text"
+  textNodeName: "#text",
+  // Keep every value exactly as it appears in the file. The parser otherwise coerces
+  // numeric-looking text, which silently corrupts real settings on the way back out:
+  // an extension of 0903 becomes 903, 0x1F becomes 31, and 1.50 becomes 1.5.
+  parseTagValue: false,
+  parseAttributeValue: false
 });
 
 const builder = new XMLBuilder({

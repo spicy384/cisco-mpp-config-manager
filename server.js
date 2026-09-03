@@ -58,6 +58,7 @@ const snapshots = createSnapshotStore({ dataDir: DATA_DIR, keep: SNAPSHOT_KEEP }
 const {
   DEFAULT_RESYNC_COMMAND,
   validateResyncCommand,
+  resolveResyncCommand,
   findLineExtension,
   sendResync,
   execOverSsh,
@@ -328,8 +329,9 @@ function sanitizeServerProfile(input) {
   // Where speed dial and BLF buttons point, e.g. "pbx.example.com:5060".
   // Optional: only the Quick editor needs it, and it says so when it is missing.
   const sipServer = String(input?.sipServer || "").trim();
-  // How to tell a phone to fetch its config, run on the PBX over SSH. Blank means the
-  // default PJSIP command; throws if the template is unusable.
+  // How to tell a phone to fetch its config, run on the PBX over SSH. Stored blank for
+  // "use the default" so a later change to the default reaches every profile; throws
+  // if a typed template is unusable.
   const resyncCommand = validateResyncCommand(input?.resyncCommand);
 
   if (!name || !host || !username || !remoteDir) {
@@ -1462,7 +1464,7 @@ app.post("/api/connect", async (req, res) => {
       profileName: target.name || null,
       // Used by the Quick editor when building speed dial and BLF targets.
       sipServer: target.sipServer || "",
-      resyncCommand: target.resyncCommand || DEFAULT_RESYNC_COMMAND,
+      resyncCommand: resolveResyncCommand(target.resyncCommand),
       hostKey: { fingerprint: hostKey.outcome.fingerprint, status: hostKey.outcome.status }
     };
 
@@ -1745,7 +1747,7 @@ app.post("/api/resync/test", async (req, res) => {
   try {
     ensureConnected();
     const ext = String(req.body?.ext || "").trim();
-    const template = validateResyncCommand(req.body?.resyncCommand ?? connection.resyncCommand);
+    const template = resolveResyncCommand(req.body?.resyncCommand ?? connection.resyncCommand);
     const command = buildResyncCommand(template, ext);
     const output = await execOverSsh(sftp.client, command);
     const verdict = classifyResyncOutput(output);

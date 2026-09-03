@@ -3,3 +3,4 @@ data/
 .claude/
 test/
 .env
+error.txt

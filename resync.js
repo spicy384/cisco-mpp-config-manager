@@ -2,14 +2,17 @@
  * Telling a phone to fetch its configuration. Cisco MPP phones re-provision when
  * they receive a SIP NOTIFY with Event: check-sync, which Asterisk sends with
  *
- *   asterisk -rx "pjsip send notify cisco-check-sync endpoint 1001"
+ *   asterisk -rx "pjsip send notify cisco-check-cfg endpoint 1001"
  *
  * That runs on the PBX over the SSH connection the app already holds. The
  * command is a per-server template so a PBX on chan_sip, or one where the SSH
  * user needs sudo, can still be driven.
  */
 
-const DEFAULT_RESYNC_COMMAND = 'asterisk -rx "pjsip send notify cisco-check-sync endpoint {ext}"';
+const DEFAULT_RESYNC_COMMAND = 'asterisk -rx "pjsip send notify cisco-check-cfg endpoint {ext}"';
+// What an earlier release stored in profiles saved with a blank template. It named a
+// NOTIFY type Asterisk does not ship, so it is treated as "use the default".
+const LEGACY_DEFAULT_RESYNC_COMMAND = 'asterisk -rx "pjsip send notify cisco-check-sync endpoint {ext}"';
 const EXEC_TIMEOUT_MS = 20000;
 
 // The extension is the only thing interpolated into a shell command, so it is
@@ -20,10 +23,14 @@ const EXT_PATTERN = /^[0-9A-Za-z_.-]{1,64}$/;
 // judged from what it printed.
 const FAILURE_OUTPUT = /unable|no such|not found|error|failed|invalid|denied|cannot|refused/i;
 
+/**
+ * Checks a template and returns it, or "" when blank so callers can tell "use the
+ * default" apart from a command someone typed. Resolve with `resolveResyncCommand`.
+ */
 function validateResyncCommand(template) {
   const command = String(template == null ? "" : template).trim();
-  if (!command) {
-    return DEFAULT_RESYNC_COMMAND;
+  if (!command || command === LEGACY_DEFAULT_RESYNC_COMMAND) {
+    return "";
   }
   if (command.length > 500) {
     throw new Error("Resync command is too long.");
@@ -37,12 +44,16 @@ function validateResyncCommand(template) {
   return command;
 }
 
+function resolveResyncCommand(template) {
+  return validateResyncCommand(template) || DEFAULT_RESYNC_COMMAND;
+}
+
 function isValidExtension(ext) {
   return EXT_PATTERN.test(String(ext == null ? "" : ext));
 }
 
 function buildResyncCommand(template, ext) {
-  const command = validateResyncCommand(template);
+  const command = resolveResyncCommand(template);
   const extension = String(ext == null ? "" : ext).trim();
   if (!isValidExtension(extension)) {
     throw new Error(`Extension "${extension}" contains characters that cannot be sent to the PBX.`);
@@ -147,8 +158,10 @@ async function sendResync(sshClient, template, ext) {
 
 module.exports = {
   DEFAULT_RESYNC_COMMAND,
+  LEGACY_DEFAULT_RESYNC_COMMAND,
   EXT_PATTERN,
   validateResyncCommand,
+  resolveResyncCommand,
   isValidExtension,
   buildResyncCommand,
   findLineExtension,

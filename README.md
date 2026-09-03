@@ -200,7 +200,7 @@ configuration. The app can tell it to, by running on the PBX over the SSH connec
 already holds:
 
 ```
-asterisk -rx "pjsip send notify cisco-check-sync endpoint {ext}"
+asterisk -rx "pjsip send notify cisco-check-cfg endpoint {ext}"
 ```
 
 `{ext}` is the phone's line 1 extension (`User_ID_1_`), which is what Asterisk knows
@@ -224,11 +224,11 @@ extension you type and shows exactly what the PBX printed. The usual causes:
 
 - **The SSH user cannot run `asterisk`.** Connecting as `root` works out of the box.
   For another user, add it to the `asterisk` group, or set the profile's resync command to
-  `sudo asterisk -rx "pjsip send notify cisco-check-sync endpoint {ext}"` with a matching
+  `sudo asterisk -rx "pjsip send notify cisco-check-cfg endpoint {ext}"` with a matching
   `sudoers` line such as `pbxmgr ALL=(root) NOPASSWD: /usr/sbin/asterisk -rx *`.
 - **`Unable to retrieve endpoint`.** The extension is not a PJSIP endpoint. On a chan_sip
-  PBX use `asterisk -rx "sip notify cisco-check-sync {ext}"` instead.
-- **`No such command`.** The `cisco-check-sync` NOTIFY type is missing from
+  PBX use `asterisk -rx "sip notify cisco-check-cfg {ext}"` instead.
+- **`No such command`.** The `cisco-check-cfg` NOTIFY type is missing from
   `pjsip_notify.conf` (or `sip_notify.conf`). FreePBX ships it; a bare Asterisk may not.
 
 The command is saved per PBX server profile and must contain `{ext}`; leave it blank for

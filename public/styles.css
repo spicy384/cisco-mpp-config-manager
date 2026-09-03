@@ -512,6 +512,45 @@ body.theme-dark .icon-moon { display: inline; }
   color: var(--text-muted);
 }
 
+.resync-test {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.resync-test label {
+  flex: 1;
+}
+
+.resync-output {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.check-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.check-inline input {
+  width: auto;
+  margin: 0;
+}
+
+.bulk-results td.resync-failed {
+  color: var(--danger);
+}
+
 .history-panel {
   margin: 0 0 14px;
   padding: 12px 14px;

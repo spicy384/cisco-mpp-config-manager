@@ -55,6 +55,15 @@ const { createSnapshotStore } = require("./snapshots");
 // this app can be undone. Oldest versions are pruned beyond this many per file.
 const SNAPSHOT_KEEP = Number(process.env.SNAPSHOT_KEEP) > 0 ? Number(process.env.SNAPSHOT_KEEP) : 20;
 const snapshots = createSnapshotStore({ dataDir: DATA_DIR, keep: SNAPSHOT_KEEP });
+const {
+  DEFAULT_RESYNC_COMMAND,
+  validateResyncCommand,
+  findLineExtension,
+  sendResync,
+  execOverSsh,
+  buildResyncCommand,
+  classifyResyncOutput
+} = require("./resync");
 
 // Auth endpoints are mounted first: they must be reachable while signed out.
 app.use(authGuard.router);
@@ -319,6 +328,9 @@ function sanitizeServerProfile(input) {
   // Where speed dial and BLF buttons point, e.g. "pbx.example.com:5060".
   // Optional: only the Quick editor needs it, and it says so when it is missing.
   const sipServer = String(input?.sipServer || "").trim();
+  // How to tell a phone to fetch its config, run on the PBX over SSH. Blank means the
+  // default PJSIP command; throws if the template is unusable.
+  const resyncCommand = validateResyncCommand(input?.resyncCommand);
 
   if (!name || !host || !username || !remoteDir) {
     throw new Error("name, host, username, and remoteDir are required.");
@@ -335,7 +347,8 @@ function sanitizeServerProfile(input) {
     port,
     username,
     remoteDir,
-    sipServer
+    sipServer,
+    resyncCommand
   };
 }
 
@@ -694,7 +707,11 @@ function jobToJson(job) {
     error: job.error || null,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt || null,
-    rollbackOf: job.request.rollbackOf || null
+    rollbackOf: job.request.rollbackOf || null,
+    resync: Boolean(job.request.resync),
+    stage: job.stage || "write",
+    resyncTotal: job.resyncTotal || 0,
+    resyncDone: job.resyncDone || 0
   };
 }
 
@@ -787,6 +804,54 @@ async function restoreSnapshot(fileName, snapshotId, user = "") {
     // The copy taken just now, i.e. what "undo this restore" would bring back.
     undoSnapshotId: before ? before.id : null
   };
+}
+
+function resyncLogEntry(fileName, station, result) {
+  const after = result.status === "sent"
+    ? `Resync sent to ${result.ext}`
+    : (result.status === "skipped" ? `Resync skipped: ${result.detail}` : null);
+
+  return {
+    ts: Date.now(),
+    action: "resync",
+    file: fileName,
+    station: station || "",
+    tag: null,
+    before: null,
+    after,
+    status: result.status === "failed" ? "error" : "changed",
+    error: result.status === "failed" ? `Resync failed: ${result.detail}` : null
+  };
+}
+
+/** Tells one phone to fetch its config, reading the file to find its extension. */
+async function resyncPhone(fileName, user = "") {
+  const remotePath = path.posix.join(connection.remoteDir, fileName);
+  const content = await sftp.get(remotePath);
+  const { entries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
+  const station = findStationDisplayNameInEntries(entries);
+  const ext = findLineExtension(entries);
+
+  const result = await sendResync(sftp.client, connection.resyncCommand, ext);
+  appendLogEntries(buildLogScope(connection), [resyncLogEntry(fileName, station, result)], user);
+
+  return { fileName, station, ...result };
+}
+
+/** The resync stage of a bulk apply: every phone whose file changed is told to fetch it. */
+async function resyncChangedPhones(job) {
+  const targets = job.results.filter((item) => item.status === "changed");
+  job.stage = "resync";
+  job.resyncTotal = targets.length;
+  job.resyncDone = 0;
+
+  for (const item of targets) {
+    job.currentFile = item.name;
+    item.resync = await sendResync(sftp.client, job.request.resyncCommand, item.ext);
+    job.resyncDone += 1;
+  }
+
+  job.currentFile = null;
 }
 
 function bulkJobIsRunning() {
@@ -939,7 +1004,8 @@ async function runBulkJob(job) {
         previousValues: changes[0]?.previousValues || [],
         newValue: singleEdit ? (singleEdit.mode === "delete" ? null : singleEdit.value) : null,
         changes,
-        snapshotId
+        snapshotId,
+        ext: findLineExtension(working)
       });
     } catch (error) {
       // One bad file must not abort the rest of the batch. The file could not be read,
@@ -956,6 +1022,10 @@ async function runBulkJob(job) {
   }
 
   job.currentFile = null;
+
+  if (!dryRun && job.request.resync) {
+    await resyncChangedPhones(job);
+  }
 
   // Only real writes are auditable events; a preview changed nothing.
   if (!dryRun) {
@@ -997,6 +1067,10 @@ async function runBulkJob(job) {
           error: null,
           snapshotId: item.snapshotId || null
         });
+      }
+
+      if (item.resync) {
+        logEntries.push(resyncLogEntry(item.name, item.station, item.resync));
       }
     }
 
@@ -1072,6 +1146,9 @@ app.post("/api/bulk-edit", (req, res) => {
         fileNames,
         edits,
         dryRun: isDryRun,
+        // Only an apply can resync, and only when asked to.
+        resync: !isDryRun && req.body?.resync === true,
+        resyncCommand: connection.resyncCommand,
         remoteDir: connection.remoteDir,
         scope: buildLogScope(connection),
         // Captured now: the job outlives the request that started it.
@@ -1385,6 +1462,7 @@ app.post("/api/connect", async (req, res) => {
       profileName: target.name || null,
       // Used by the Quick editor when building speed dial and BLF targets.
       sipServer: target.sipServer || "",
+      resyncCommand: target.resyncCommand || DEFAULT_RESYNC_COMMAND,
       hostKey: { fingerprint: hostKey.outcome.fingerprint, status: hostKey.outcome.status }
     };
 
@@ -1637,6 +1715,44 @@ app.post("/api/files/:name/restore", async (req, res) => {
     res.json({ ok: true, message: `Restored ${fileName}`, ...result });
   } catch (error) {
     res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+// --- resync -----------------------------------------------------------------
+app.post("/api/files/:name/resync", async (req, res) => {
+  try {
+    ensureConnected();
+    const fileName = sanitizeFileName(req.params.name);
+    const result = await resyncPhone(fileName, req.user ? req.user.username : "");
+
+    if (result.status === "skipped") {
+      return res.status(400).json({ error: `Cannot resync ${fileName}: ${result.detail}.`, ...result });
+    }
+    if (result.status === "failed") {
+      return res.status(502).json({ error: `Resync failed: ${result.detail}`, ...result });
+    }
+
+    const who = result.station ? `${result.station} (${result.ext})` : result.ext;
+    return res.json({ ok: true, message: `Resync sent to ${who}`, ...result });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// Runs the resync command for a typed extension and shows exactly what the PBX said,
+// for working out group membership, sudo, or PJSIP-vs-chan_sip problems.
+app.post("/api/resync/test", async (req, res) => {
+  try {
+    ensureConnected();
+    const ext = String(req.body?.ext || "").trim();
+    const template = validateResyncCommand(req.body?.resyncCommand ?? connection.resyncCommand);
+    const command = buildResyncCommand(template, ext);
+    const output = await execOverSsh(sftp.client, command);
+    const verdict = classifyResyncOutput(output);
+
+    return res.json({ ok: verdict.ok, command, code: output.code, stdout: output.stdout, stderr: output.stderr, detail: verdict.detail });
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
   }
 });
 

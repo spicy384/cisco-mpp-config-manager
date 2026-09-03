@@ -28,6 +28,8 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
   connections and exportable to CSV
 - Every write keeps a copy of the file first: restore any earlier version from the editor's
   **History** or straight from the change log, or roll back a whole bulk batch in one go
+- Tell a phone to fetch its new configuration - one phone with **Resync Phone**, or every
+  phone a bulk edit changed with a tick box - using the SSH connection already open
 
 ## Quick editor
 The editor has two tabs. **Quick** covers the changes you make most often without needing to
@@ -191,6 +193,47 @@ Versions are kept per PBX under `snapshots/` in the data directory, **20 per fil
 default (`SNAPSHOT_KEEP` changes this); the oldest is dropped when a new one is kept. A
 version is only ever restored to the server it came from. Files created from scratch have
 no earlier version, and nothing is kept for writes made outside this app.
+
+## Resyncing phones
+Writing a config file does not change anything on the phone until it next fetches its
+configuration. The app can tell it to, by running on the PBX over the SSH connection it
+already holds:
+
+```
+asterisk -rx "pjsip send notify cisco-check-sync endpoint {ext}"
+```
+
+`{ext}` is the phone's line 1 extension (`User_ID_1_`), which is what Asterisk knows
+the phone as. Cisco MPP phones act on the resulting SIP NOTIFY when **Resync From SIP**
+is enabled in their provisioning settings (`Resync_From_SIP` = `Yes`, as in the example
+template). A phone restarts only if the change it fetched requires it.
+
+Resync is always a separate, deliberate step:
+
+- **Resync Phone** in the editor, next to Save, resyncs the open phone. Save never
+  resyncs by itself, so you can make several changes and push them once.
+- **Resync changed phones after applying** in Bulk Edit resyncs every phone the batch
+  actually changed, as a second stage with its own progress. Untick it and nothing is sent.
+  A rollback does not resync; resync the affected phones afterwards if you need to.
+- A phone with no line 1 extension is skipped and says so. Every resync, sent, skipped or
+  failed, is a row in the change log.
+
+### If resync does not work
+Use **Test Resync** in the Connection panel while connected: it runs the command for an
+extension you type and shows exactly what the PBX printed. The usual causes:
+
+- **The SSH user cannot run `asterisk`.** Connecting as `root` works out of the box.
+  For another user, add it to the `asterisk` group, or set the profile's resync command to
+  `sudo asterisk -rx "pjsip send notify cisco-check-sync endpoint {ext}"` with a matching
+  `sudoers` line such as `pbxmgr ALL=(root) NOPASSWD: /usr/sbin/asterisk -rx *`.
+- **`Unable to retrieve endpoint`.** The extension is not a PJSIP endpoint. On a chan_sip
+  PBX use `asterisk -rx "sip notify cisco-check-sync {ext}"` instead.
+- **`No such command`.** The `cisco-check-sync` NOTIFY type is missing from
+  `pjsip_notify.conf` (or `sip_notify.conf`). FreePBX ships it; a bare Asterisk may not.
+
+The command is saved per PBX server profile and must contain `{ext}`; leave it blank for
+the default. The extension is checked before it is inserted - only letters, digits, `_`,
+`.` and `-` are accepted - so a config file cannot smuggle shell syntax into the command.
 
 ## Running in Docker
 
@@ -501,7 +544,7 @@ gitignored) or point `DEFAULT_TEMPLATE_PATH` at it. Either takes precedence over
 
 ## Notes
 - **SFTP passwords are never persisted** - you type them at connect time. Only the profile
-  (host, port, username, remote directory and SIP server) is saved.
+  (host, port, username, remote directory, SIP server and resync command) is saved.
 - **Values are preserved exactly as written.** Leading zeros, trailing decimal zeros and
   the like survive unchanged, so an extension of `0903` stays `0903` rather than becoming
   `903`.

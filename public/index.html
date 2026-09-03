@@ -156,6 +156,16 @@
         <label>SIP Server for speed dial / BLF (optional)
           <input id="sip-server" placeholder="pbx.example.com:5060" />
         </label>
+        <label>Resync command (optional - runs on the PBX over SSH; {ext} is the phone's line 1 extension)
+          <input id="resync-command" placeholder='asterisk -rx "pjsip send notify cisco-check-sync endpoint {ext}"' />
+        </label>
+        <div class="resync-test">
+          <label>Test resync while connected
+            <input id="resync-test-ext" placeholder="1001" />
+          </label>
+          <button type="button" id="resync-test-btn" class="secondary">Test Resync</button>
+        </div>
+        <pre id="resync-test-output" class="resync-output" hidden></pre>
         <label>Password (required to connect) <input name="password" type="password" required /></label>
 
         <div class="actions">
@@ -298,6 +308,7 @@
         <div id="panel-advanced" class="tab-panel" hidden>
         <div class="toolbar">
           <button id="save-top-btn" type="button">Save / Upload</button>
+          <button id="resync-top-btn" type="button" class="secondary" title="Tell this phone to fetch its configuration now">Resync Phone</button>
           <button id="create-top-btn" type="button" class="secondary">Create New</button>
           <button id="reset-top-btn" type="button" class="secondary">Reset</button>
           <span class="toolbar-divider" aria-hidden="true"></span>
@@ -343,6 +354,7 @@
 
         <div class="actions">
           <button id="save-btn" type="button">Save / Upload</button>
+          <button id="resync-btn" type="button" class="secondary" title="Tell this phone to fetch its configuration now">Resync Phone</button>
           <button id="create-btn" type="button" class="secondary">Create New</button>
           <button id="reset-btn" type="button" class="secondary">Reset</button>
           <button id="show-all-bottom-btn" type="button" class="secondary">Show All Fields</button>
@@ -380,6 +392,10 @@
         <button id="bulk-preview-btn" type="button">Preview Changes</button>
         <button id="bulk-apply-btn" type="button" class="danger" disabled>Apply to PBX</button>
         <button id="bulk-rollback-btn" type="button" class="secondary" hidden>Roll Back This Batch</button>
+        <label class="check-inline" title="After writing, tell each changed phone to fetch its configuration">
+          <input type="checkbox" id="bulk-resync" />
+          Resync changed phones after applying
+        </label>
       </div>
 
       <div id="bulk-progress" class="bulk-progress" hidden>

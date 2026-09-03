@@ -56,6 +56,13 @@ const historyPanel = document.getElementById("history-panel");
 const historyMetaEl = document.getElementById("history-meta");
 const historyListEl = document.getElementById("history-list");
 const historyCloseBtn = document.getElementById("history-close-btn");
+const resyncCommandInput = document.getElementById("resync-command");
+const resyncTestExtInput = document.getElementById("resync-test-ext");
+const resyncTestBtn = document.getElementById("resync-test-btn");
+const resyncTestOutput = document.getElementById("resync-test-output");
+const resyncBtn = document.getElementById("resync-btn");
+const resyncTopBtn = document.getElementById("resync-top-btn");
+const bulkResyncInput = document.getElementById("bulk-resync");
 const bulkProgressEl = document.getElementById("bulk-progress");
 const bulkProgressLabelEl = document.getElementById("bulk-progress-label");
 const bulkProgressBarEl = document.getElementById("bulk-progress-bar");
@@ -512,6 +519,7 @@ function fillFormFromServer(serverId) {
   connectForm.elements.username.value = server.username || "";
   connectForm.elements.remoteDir.value = server.remoteDir || "";
   sipServerInput.value = server.sipServer || "";
+  resyncCommandInput.value = server.resyncCommand || "";
 }
 
 async function refreshFiles() {
@@ -693,7 +701,8 @@ async function saveServerProfile() {
     port: Number(port) || 22,
     username,
     remoteDir,
-    sipServer: sipServerInput.value.trim()
+    sipServer: sipServerInput.value.trim(),
+    resyncCommand: resyncCommandInput.value.trim()
   };
 
   const data = await api("/api/servers", {
@@ -806,7 +815,11 @@ function renderBulkResults(data) {
   const table = document.createElement("table");
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
-  for (const label of ["Phone", "File", "Status", "Current Value", "New Value"]) {
+  const columns = ["Phone", "File", "Status", "Current Value", "New Value"];
+  if (data.resync) {
+    columns.push("Resync");
+  }
+  for (const label of columns) {
     const th = document.createElement("th");
     th.textContent = label;
     headRow.appendChild(th);
@@ -842,6 +855,16 @@ function renderBulkResults(data) {
     }
     tr.appendChild(afterTd);
 
+    if (data.resync) {
+      const resyncTd = document.createElement("td");
+      resyncTd.textContent = describeResync(item.resync);
+      if (item.resync?.status === "failed") {
+        resyncTd.className = "resync-failed";
+        resyncTd.title = item.resync.detail || "";
+      }
+      tr.appendChild(resyncTd);
+    }
+
     tbody.appendChild(tr);
   }
 
@@ -864,6 +887,17 @@ function setBulkBusy(busy, verb = "Working") {
 }
 
 function updateBulkProgress(job, verb) {
+  if (job.stage === "resync") {
+    const total = job.resyncTotal || 0;
+    const done = job.resyncDone || 0;
+    const pct = total > 0 ? Math.round((done / total) * 100) : 100;
+    bulkProgressBarEl.style.width = `${pct}%`;
+    bulkProgressLabelEl.textContent = job.currentFile
+      ? `Resyncing ${done + 1} of ${total}: ${job.currentFile}`
+      : `Resyncing ${done} of ${total} (${pct}%)`;
+    return;
+  }
+
   const total = job.total || 0;
   const done = job.processed || 0;
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
@@ -949,7 +983,10 @@ async function applyBulkEdit() {
     return;
   }
 
-  const job = await runBulkJobWithProgress(request, { dryRun: false, verb: "Applying to" });
+  const job = await runBulkJobWithProgress(
+    { ...request, resync: bulkResyncInput.checked },
+    { dryRun: false, verb: "Applying to" }
+  );
 
   renderBulkResults(job);
   offerBatchRollback(job);
@@ -958,9 +995,11 @@ async function applyBulkEdit() {
 
   const changed = job.summary?.changed || 0;
   const errors = job.summary?.error || 0;
+  const resyncNote = job.resync ? `. ${summarizeResync(job.results)}` : "";
+  const resyncFailed = job.resync && (job.results || []).some((item) => item.resync?.status === "failed");
   setStatus(
-    `Bulk edit applied to ${changed} file${changed === 1 ? "" : "s"}${errors ? `, ${errors} failed` : ""}.`,
-    errors > 0
+    `Bulk edit applied to ${changed} file${changed === 1 ? "" : "s"}${errors ? `, ${errors} failed` : ""}${resyncNote}`,
+    errors > 0 || resyncFailed
   );
 
   await refreshFiles();
@@ -976,6 +1015,7 @@ const LOG_ACTION_LABEL = {
   "bulk-set": "Bulk set",
   "bulk-delete": "Bulk delete",
   restore: "Restored version",
+  resync: "Resync",
   "field-changed": "Changed field",
   "field-added": "Added field",
   "field-removed": "Removed field",
@@ -1334,6 +1374,97 @@ historyCloseBtn.addEventListener("click", () => {
 
 bulkRollbackBtn.addEventListener("click", () => {
   rollbackBatch().catch((error) => setStatus(error.message, true));
+});
+
+// --- resync -----------------------------------------------------------------------
+
+function describeResync(result) {
+  if (!result) {
+    return "";
+  }
+  if (result.status === "sent") {
+    return `Sent to ${result.ext}`;
+  }
+  if (result.status === "skipped") {
+    return `Skipped: ${result.detail}`;
+  }
+  return `Failed: ${result.detail}`;
+}
+
+function summarizeResync(results) {
+  const counts = { sent: 0, skipped: 0, failed: 0 };
+  for (const item of results || []) {
+    if (item.resync && counts[item.resync.status] !== undefined) {
+      counts[item.resync.status] += 1;
+    }
+  }
+  const parts = [`Resync: ${counts.sent} sent`];
+  if (counts.skipped) {
+    parts.push(`${counts.skipped} skipped`);
+  }
+  if (counts.failed) {
+    parts.push(`${counts.failed} failed`);
+  }
+  return parts.join(", ");
+}
+
+/** Tells the open phone to fetch its config. Deliberately separate from Save. */
+async function resyncCurrentPhone() {
+  if (!currentFile) {
+    setStatus("Open a phone from the XML Files list first.", true);
+    return;
+  }
+
+  const station = baseline.entries?.find((e) => e.key === "Station_Display_Name")?.value || currentFile;
+  const unsaved = JSON.stringify(readEntries()) !== JSON.stringify(baseline.entries || []);
+  const ok = confirm(
+    `Tell ${station} to fetch its configuration from the PBX now?\n\n`
+      + (unsaved ? "The editor has unsaved changes; the phone will load what is on the PBX, not what is in the editor.\n\n" : "")
+      + "The phone may restart if the change requires it."
+  );
+  if (!ok) {
+    setStatus("Resync cancelled.");
+    return;
+  }
+
+  const result = await api(`/api/files/${encodeURIComponent(currentFile)}/resync`, { method: "POST" });
+  setStatus(result.message || `Resync sent to ${result.ext}`);
+  await refreshLogScopes();
+}
+
+async function testResync() {
+  const ext = resyncTestExtInput.value.trim();
+  if (!ext) {
+    setStatus("Enter an extension to test the resync command with.", true);
+    return;
+  }
+
+  resyncTestOutput.hidden = true;
+  const result = await api("/api/resync/test", {
+    method: "POST",
+    body: JSON.stringify({ ext, resyncCommand: resyncCommandInput.value.trim() })
+  });
+
+  const lines = [`$ ${result.command}`, `exit status ${result.code}`];
+  if (result.stdout.trim()) {
+    lines.push(result.stdout.trim());
+  }
+  if (result.stderr.trim()) {
+    lines.push(`stderr: ${result.stderr.trim()}`);
+  }
+  resyncTestOutput.textContent = lines.join("\n");
+  resyncTestOutput.hidden = false;
+  setStatus(result.ok ? `Resync command worked for ${ext}.` : `Resync command failed for ${ext}; see the output below.`, !result.ok);
+}
+
+for (const btn of [resyncBtn, resyncTopBtn]) {
+  btn.addEventListener("click", () => {
+    resyncCurrentPhone().catch((error) => setStatus(error.message, true));
+  });
+}
+
+resyncTestBtn.addEventListener("click", () => {
+  testResync().catch((error) => setStatus(error.message, true));
 });
 
 function exportLogCsv() {

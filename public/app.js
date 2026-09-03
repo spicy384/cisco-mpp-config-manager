@@ -62,6 +62,7 @@ const resyncTestBtn = document.getElementById("resync-test-btn");
 const resyncTestOutput = document.getElementById("resync-test-output");
 const resyncBtn = document.getElementById("resync-btn");
 const resyncTopBtn = document.getElementById("resync-top-btn");
+const resyncQuickBtn = document.getElementById("resync-quick-btn");
 const bulkResyncInput = document.getElementById("bulk-resync");
 const bulkProgressEl = document.getElementById("bulk-progress");
 const bulkProgressLabelEl = document.getElementById("bulk-progress-label");
@@ -1457,7 +1458,7 @@ async function testResync() {
   setStatus(result.ok ? `Resync command worked for ${ext}.` : `Resync command failed for ${ext}; see the output below.`, !result.ok);
 }
 
-for (const btn of [resyncBtn, resyncTopBtn]) {
+for (const btn of [resyncBtn, resyncTopBtn, resyncQuickBtn]) {
   btn.addEventListener("click", () => {
     resyncCurrentPhone().catch((error) => setStatus(error.message, true));
   });

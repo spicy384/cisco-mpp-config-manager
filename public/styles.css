@@ -512,6 +512,19 @@ body.theme-dark .icon-moon { display: inline; }
   color: var(--text-muted);
 }
 
+.quick-footer {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  align-items: center;
+}
+
+.quick-footer-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 60ch;
+}
+
 .resync-test {
   display: flex;
   align-items: flex-end;

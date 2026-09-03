@@ -50,6 +50,11 @@ const authGuard = createAuth({ dataDir: DATA_DIR });
 const { createHostKeyStore } = require("./host-keys");
 // SSH host keys are remembered on first connection and checked on every later one.
 const hostKeys = createHostKeyStore({ dataDir: DATA_DIR });
+const { createSnapshotStore } = require("./snapshots");
+// A copy of every file is kept before it is overwritten, so any change made through
+// this app can be undone. Oldest versions are pruned beyond this many per file.
+const SNAPSHOT_KEEP = Number(process.env.SNAPSHOT_KEEP) > 0 ? Number(process.env.SNAPSHOT_KEEP) : 20;
+const snapshots = createSnapshotStore({ dataDir: DATA_DIR, keep: SNAPSHOT_KEEP });
 
 // Auth endpoints are mounted first: they must be reachable while signed out.
 app.use(authGuard.router);
@@ -688,8 +693,160 @@ function jobToJson(job) {
     summary: summarizeResults(job.results),
     error: job.error || null,
     startedAt: job.startedAt,
-    finishedAt: job.finishedAt || null
+    finishedAt: job.finishedAt || null,
+    rollbackOf: job.request.rollbackOf || null
   };
+}
+
+/**
+ * Stores the file as it currently is on the PBX before it is overwritten. Returns
+ * null when the file does not exist yet. Any other failure is thrown so the write
+ * does not go ahead: a change that cannot be undone is not one worth making.
+ * Pass `xmlText` when the caller has already read the file.
+ */
+async function snapshotBeforeWrite(scope, fileName, remotePath, { user = "", reason = "save", station = "", xmlText = null } = {}) {
+  let raw = xmlText;
+
+  if (raw === null) {
+    if (!(await sftp.exists(remotePath))) {
+      return null;
+    }
+    const content = await sftp.get(remotePath);
+    raw = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
+  }
+
+  const entry = snapshots.capture({
+    scopeKey: scope.key,
+    fileName,
+    content: raw,
+    user,
+    reason,
+    station: station || extractStationDisplayName(raw) || ""
+  });
+
+  return { ...entry, xmlText: raw };
+}
+
+/**
+ * Writes a stored version back to the PBX. The file as it is now is snapshotted
+ * first, so a restore is itself undoable. Versions are looked up under the
+ * connected server's scope, so one PBX's history can never land on another.
+ */
+async function restoreSnapshot(fileName, snapshotId, user = "") {
+  const scope = buildLogScope(connection);
+  const snapshot = snapshots.read(scope.key, fileName, snapshotId);
+
+  if (!snapshot) {
+    const error = new Error("No such version exists for this server.");
+    error.status = 404;
+    throw error;
+  }
+
+  const remotePath = path.posix.join(connection.remoteDir, fileName);
+  const before = await snapshotBeforeWrite(scope, fileName, remotePath, { user, reason: "restore" });
+
+  await sftp.put(Buffer.from(snapshot.content, "utf8"), remotePath);
+
+  const restoredEntries = xmlToEntries(snapshot.content).entries;
+  const previousEntries = before ? xmlToEntries(before.xmlText).entries : [];
+  const station = findStationDisplayNameInEntries(previousEntries) || findStationDisplayNameInEntries(restoredEntries);
+
+  setFileMetadataCacheEntry(buildCacheKey(fileName), {
+    size: Buffer.byteLength(snapshot.content, "utf8"),
+    modified: Date.now(),
+    stationDisplayName: findStationDisplayNameInEntries(restoredEntries)
+  });
+
+  const changes = diffEntriesForLog(previousEntries, restoredEntries);
+  const summary = changes.length === 0
+    ? "no field changes"
+    : `${changes.length} field${changes.length === 1 ? "" : "s"}`;
+
+  const logEntries = [
+    {
+      ts: Date.now(),
+      action: "restore",
+      file: fileName,
+      station,
+      tag: null,
+      before: null,
+      after: `Restored version from ${new Date(snapshot.ts).toISOString()} (${summary})`,
+      status: "changed",
+      error: null
+    },
+    ...(changes.length ? buildSaveLogEntries(fileName, changes, station) : [])
+  ].map((entry) => ({ ...entry, snapshotId: before ? before.id : null }));
+
+  appendLogEntries(scope, logEntries, user);
+
+  return {
+    fileName,
+    station,
+    restored: { id: snapshot.id, ts: snapshot.ts },
+    changes: changes.length,
+    // The copy taken just now, i.e. what "undo this restore" would bring back.
+    undoSnapshotId: before ? before.id : null
+  };
+}
+
+function bulkJobIsRunning() {
+  const running = activeBulkJobId && bulkJobs.get(activeBulkJobId);
+  return Boolean(running && running.status === "running");
+}
+
+/** Runs a job in the background; the client polls /api/bulk-edit/:jobId for progress. */
+function launchJob(job, runner) {
+  bulkJobs.set(job.id, job);
+  activeBulkJobId = job.id;
+
+  runner(job)
+    .then(() => {
+      job.status = "done";
+    })
+    .catch((error) => {
+      job.status = "failed";
+      job.error = error.message;
+    })
+    .finally(() => {
+      job.finishedAt = Date.now();
+      if (activeBulkJobId === job.id) {
+        activeBulkJobId = null;
+      }
+    });
+}
+
+/** Puts every file a bulk apply changed back to the copy taken just before it. */
+async function runRollbackJob(job) {
+  const { targets, user } = job.request;
+
+  for (const target of targets) {
+    job.currentFile = target.fileName;
+
+    try {
+      const result = await restoreSnapshot(target.fileName, target.snapshotId, user);
+      job.results.push({
+        name: target.fileName,
+        station: result.station,
+        status: "changed",
+        matched: 0,
+        previousValues: [],
+        newValue: `restored (${result.changes} field${result.changes === 1 ? "" : "s"})`,
+        changes: [],
+        snapshotId: result.undoSnapshotId
+      });
+    } catch (error) {
+      job.results.push({
+        name: target.fileName,
+        station: fileMetadataCache.get(buildCacheKey(target.fileName))?.stationDisplayName || "",
+        status: "error",
+        error: error.message
+      });
+    } finally {
+      job.processed += 1;
+    }
+  }
+
+  job.currentFile = null;
 }
 
 async function runBulkJob(job) {
@@ -758,7 +915,14 @@ async function runBulkJob(job) {
         continue;
       }
 
+      let snapshotId = null;
       if (!dryRun) {
+        // The file was already read above; keep those exact bytes before overwriting.
+        const snapshot = await snapshotBeforeWrite(scope, fileName, remotePath, {
+          user: job.request.user, reason: "bulk", station, xmlText
+        });
+        snapshotId = snapshot ? snapshot.id : null;
+
         await sftp.put(Buffer.from(nextXml, "utf8"), remotePath);
         setFileMetadataCacheEntry(buildCacheKey(fileName), {
           size: Buffer.byteLength(nextXml, "utf8"),
@@ -774,7 +938,8 @@ async function runBulkJob(job) {
         matched: totalMatched,
         previousValues: changes[0]?.previousValues || [],
         newValue: singleEdit ? (singleEdit.mode === "delete" ? null : singleEdit.value) : null,
-        changes
+        changes,
+        snapshotId
       });
     } catch (error) {
       // One bad file must not abort the rest of the batch. The file could not be read,
@@ -829,7 +994,8 @@ async function runBulkJob(job) {
           before: change.before,
           after: change.after,
           status: "changed",
-          error: null
+          error: null,
+          snapshotId: item.snapshotId || null
         });
       }
     }
@@ -843,8 +1009,7 @@ app.post("/api/bulk-edit", (req, res) => {
     ensureConnected();
     pruneBulkJobs();
 
-    const running = activeBulkJobId && bulkJobs.get(activeBulkJobId);
-    if (running && running.status === "running") {
+    if (bulkJobIsRunning()) {
       return res.status(409).json({ error: "A bulk edit is already running. Wait for it to finish." });
     }
 
@@ -914,26 +1079,69 @@ app.post("/api/bulk-edit", (req, res) => {
       }
     };
 
-    bulkJobs.set(job.id, job);
-    activeBulkJobId = job.id;
-
-    // Kick off in the background; the client polls /api/bulk-edit/:jobId for progress.
-    runBulkJob(job)
-      .then(() => {
-        job.status = "done";
-      })
-      .catch((error) => {
-        job.status = "failed";
-        job.error = error.message;
-      })
-      .finally(() => {
-        job.finishedAt = Date.now();
-        if (activeBulkJobId === job.id) {
-          activeBulkJobId = null;
-        }
-      });
+    launchJob(job, runBulkJob);
 
     return res.status(202).json({ jobId: job.id, total: job.total, dryRun: isDryRun });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// Undoes a completed apply as one job, so the same progress UI applies.
+app.post("/api/bulk-edit/:jobId/rollback", (req, res) => {
+  try {
+    ensureConnected();
+    pruneBulkJobs();
+
+    const source = bulkJobs.get(String(req.params.jobId || ""));
+    if (!source) {
+      return res.status(404).json({ error: "Job not found or expired." });
+    }
+    if (source.dryRun || source.status !== "done" || source.request.rollbackOf) {
+      return res.status(400).json({ error: "Only a completed apply can be rolled back." });
+    }
+
+    const scope = buildLogScope(connection);
+    if (source.request.scope?.key !== scope.key) {
+      return res.status(409).json({ error: "That batch was applied to a different server. Connect to it first." });
+    }
+    if (bulkJobIsRunning()) {
+      return res.status(409).json({ error: "A bulk edit is already running. Wait for it to finish." });
+    }
+
+    const targets = source.results
+      .filter((item) => item.status === "changed" && item.snapshotId)
+      .map((item) => ({ fileName: item.name, snapshotId: item.snapshotId }));
+
+    if (targets.length === 0) {
+      return res.status(400).json({ error: "Nothing in that batch can be rolled back." });
+    }
+
+    const job = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      status: "running",
+      dryRun: false,
+      key: source.key,
+      mode: "rollback",
+      editCount: 0,
+      total: targets.length,
+      processed: 0,
+      currentFile: null,
+      results: [],
+      startedAt: Date.now(),
+      finishedAt: null,
+      error: null,
+      request: {
+        rollbackOf: source.id,
+        targets,
+        scope,
+        user: req.user ? req.user.username : ""
+      }
+    };
+
+    launchJob(job, runRollbackJob);
+
+    return res.status(202).json({ jobId: job.id, total: job.total, dryRun: false, rollbackOf: source.id });
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
@@ -1318,16 +1526,13 @@ app.post("/api/files/:name", async (req, res) => {
     const xml = entriesToXml(rootKey, entries);
     const remotePath = path.posix.join(connection.remoteDir, fileName);
 
-    // Read the current version first so the log can record a real field-level diff.
-    // A failure here (e.g. the file does not exist yet) must not block the save.
-    let previousEntries = null;
-    try {
-      const existing = await sftp.get(remotePath);
-      const existingXml = Buffer.isBuffer(existing) ? existing.toString("utf8") : String(existing);
-      previousEntries = xmlToEntries(existingXml).entries;
-    } catch {
-      previousEntries = null;
-    }
+    const scope = buildLogScope(connection);
+    const user = req.user ? req.user.username : "";
+
+    // Keep the file as it is now. It is what Restore brings back, and it is the
+    // "before" side of the field-level diff in the log. Null means a brand new file.
+    const snapshot = await snapshotBeforeWrite(scope, fileName, remotePath, { user, reason: "save" });
+    const previousEntries = snapshot ? xmlToEntries(snapshot.xmlText).entries : null;
 
     await sftp.put(Buffer.from(xml, "utf8"), remotePath);
 
@@ -1339,10 +1544,10 @@ app.post("/api/files/:name", async (req, res) => {
     });
 
     // Identify the phone by its station name as it was before this save, falling back to
-    // the new value when the file could not be read or had no name set.
+    // the new value when the file is new or had no name set.
     const loggedStation = findStationDisplayNameInEntries(previousEntries || []) || stationDisplayName;
 
-    const logEntries = previousEntries === null
+    const logEntries = (previousEntries === null
       ? [{
           ts: Date.now(),
           action: "save",
@@ -1350,17 +1555,88 @@ app.post("/api/files/:name", async (req, res) => {
           station: loggedStation,
           tag: null,
           before: null,
-          after: `${entries.length} field${entries.length === 1 ? "" : "s"} (previous version unavailable)`,
+          after: `${entries.length} field${entries.length === 1 ? "" : "s"} (new file)`,
           status: "changed",
           error: null
         }]
-      : buildSaveLogEntries(fileName, diffEntriesForLog(previousEntries, entries), loggedStation);
+      : buildSaveLogEntries(fileName, diffEntriesForLog(previousEntries, entries), loggedStation)
+    ).map((entry) => ({ ...entry, snapshotId: snapshot ? snapshot.id : null }));
 
-    appendLogEntries(buildLogScope(connection), logEntries, req.user ? req.user.username : "");
+    appendLogEntries(scope, logEntries, user);
 
     res.json({ ok: true, message: `Saved ${fileName}`, fileName });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// --- version history ---------------------------------------------------------
+app.get("/api/files/:name/history", (req, res) => {
+  try {
+    ensureConnected();
+    const fileName = sanitizeFileName(req.params.name);
+    const scope = buildLogScope(connection);
+
+    res.json({ fileName, keep: SNAPSHOT_KEEP, versions: snapshots.list(scope.key, fileName) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// One version in full, plus what restoring it would change on the PBX right now.
+app.get("/api/files/:name/history/:id", async (req, res) => {
+  try {
+    ensureConnected();
+    const fileName = sanitizeFileName(req.params.name);
+    const scope = buildLogScope(connection);
+    const snapshot = snapshots.read(scope.key, fileName, String(req.params.id || ""));
+
+    if (!snapshot) {
+      return res.status(404).json({ error: "No such version exists for this server." });
+    }
+
+    const restored = xmlToEntries(snapshot.content);
+    const remotePath = path.posix.join(connection.remoteDir, fileName);
+    let current = null;
+
+    if (await sftp.exists(remotePath)) {
+      const content = await sftp.get(remotePath);
+      current = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content)).entries;
+    }
+
+    const { content, ...version } = snapshot;
+    res.json({
+      fileName,
+      version,
+      rootKey: restored.rootKey,
+      entries: restored.entries,
+      xmlText: content,
+      currentExists: current !== null,
+      diff: current ? diffEntriesForLog(current, restored.entries) : []
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/files/:name/restore", async (req, res) => {
+  try {
+    ensureConnected();
+
+    if (bulkJobIsRunning()) {
+      return res.status(409).json({ error: "A bulk edit is running. Wait for it to finish." });
+    }
+
+    const fileName = sanitizeFileName(req.params.name);
+    const snapshotId = String(req.body?.snapshotId || "");
+    if (!snapshotId) {
+      return res.status(400).json({ error: "snapshotId is required." });
+    }
+
+    const result = await restoreSnapshot(fileName, snapshotId, req.user ? req.user.username : "");
+    res.json({ ok: true, message: `Restored ${fileName}`, ...result });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
@@ -1397,7 +1673,8 @@ app.post("/api/files", async (req, res) => {
       before: null,
       after: `${entries.length} field${entries.length === 1 ? "" : "s"}`,
       status: "changed",
-      error: null
+      error: null,
+      snapshotId: null
     }], req.user ? req.user.username : "");
 
     res.json({ ok: true, message: `Created ${fileName}`, fileName });

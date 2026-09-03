@@ -217,6 +217,21 @@
         <div class="panel-head">
           <h2>Editor</h2>
           <span id="editor-count" class="badge">No file loaded</span>
+          <button type="button" id="history-btn" class="secondary small" hidden>History</button>
+        </div>
+
+        <div id="history-panel" class="history-panel" hidden>
+          <div class="history-head">
+            <strong>Version history</strong>
+            <span id="history-meta" class="badge"></span>
+            <button type="button" id="history-close-btn" class="secondary small">Close</button>
+          </div>
+          <p class="history-help">
+            A copy of this file is kept each time it is written through this app. Restoring
+            writes that copy back to the PBX; the current file is kept first, so a restore
+            can itself be undone.
+          </p>
+          <div id="history-list" class="bulk-results history-list"></div>
         </div>
         <div class="editor-meta">
           <label>File Name <input id="file-name" placeholder="spa001122334455.xml" /></label>
@@ -364,6 +379,7 @@
       <div class="actions">
         <button id="bulk-preview-btn" type="button">Preview Changes</button>
         <button id="bulk-apply-btn" type="button" class="danger" disabled>Apply to PBX</button>
+        <button id="bulk-rollback-btn" type="button" class="secondary" hidden>Roll Back This Batch</button>
       </div>
 
       <div id="bulk-progress" class="bulk-progress" hidden>

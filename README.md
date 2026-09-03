@@ -26,6 +26,8 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
 - Bulk edit one tag across many config files at once, preview-first, with live progress
 - Per-server change log of every write, showing field-level before and after, kept between
   connections and exportable to CSV
+- Every write keeps a copy of the file first: restore any earlier version from the editor's
+  **History** or straight from the change log, or roll back a whole bulk batch in one go
 
 ## Quick editor
 The editor has two tabs. **Quick** covers the changes you make most often without needing to
@@ -170,6 +172,26 @@ recorded as a summary, since there is no previous version to compare against.
 - Each server keeps its most recent 2000 entries; older ones roll off.
 - Stored in `data/change-log.json`.
 
+## Version history and rollback
+Before the app overwrites a config file - an editor save, a bulk apply, a Quick action -
+it stores the file exactly as it was. That makes every change undoable:
+
+- **History** in the editor lists the kept versions of the open file (when, why it was
+  kept, by whom, phone name, size) with a **Restore** button on each.
+- **Restore** in the change log puts the file back as it was *before that row's change*.
+- **Roll Back This Batch** appears after a bulk apply and restores every file the batch
+  changed, with the same progress bar as the apply.
+
+Restore always shows what will change - the field-level differences between the version
+and the file as it is on the PBX right now - before writing anything, and it stores the
+current file first, so a restore can itself be undone. If a copy cannot be stored (disk
+full, bad permissions) the write is refused rather than made without a way back.
+
+Versions are kept per PBX under `snapshots/` in the data directory, **20 per file** by
+default (`SNAPSHOT_KEEP` changes this); the oldest is dropped when a new one is kept. A
+version is only ever restored to the server it came from. Files created from scratch have
+no earlier version, and nothing is kept for writes made outside this app.
+
 ## Running in Docker
 
 ```bash
@@ -207,8 +229,9 @@ Run **one instance only**. The SFTP connection and in-flight bulk jobs are held 
 so a second replica would not share them.
 
 ### Persistent data
-Saved servers, templates and the change log live on the `pbx-data` volume, mounted at
-`/data`. They survive `docker compose down` and image rebuilds. To back them up:
+Saved servers, templates, kept file versions and the change log live on the `pbx-data`
+volume, mounted at `/data`. They survive `docker compose down` and image rebuilds. To
+back them up:
 
 ```bash
 docker run --rm -v pbx-data:/data -v "$PWD:/backup" alpine tar czf /backup/pbx-data.tgz -C /data .
@@ -244,6 +267,7 @@ The container logs which template it resolved at startup, so check `docker compo
 | `TLS_HOSTS` | unset | Extra names/IPs for the generated certificate's SANs, comma separated |
 | `TLS_CERT` / `TLS_KEY` | unset | Paths to your own certificate and key; take precedence over `TLS_ENABLED` |
 | `TRUST_PROXY_AUTH` | `false` | Accept a reverse proxy's authentication header (see above) |
+| `SNAPSHOT_KEEP` | `20` | Versions kept per config file for restore and rollback |
 | `PROXY_USER_HEADER` | `remote-user` | Which header carries the username in that mode |
 
 ### Updating
@@ -490,8 +514,9 @@ gitignored) or point `DEFAULT_TEMPLATE_PATH` at it. Either takes precedence over
   that connection. The change log records who did what, but users are not isolated from one
   another. Give accounts only to people you would trust with the PBX password.
 - The `data/` directory holds accounts, sessions, saved servers, templates, remembered SSH
-  host keys and the change log. It is gitignored and must stay that way - it contains
-  password hashes, TOTP secrets and templates that may carry phone admin passwords.
+  host keys, kept file versions and the change log. It is gitignored and must stay that
+  way - it contains password hashes, TOTP secrets, and templates and kept versions that
+  carry phone passwords in plain text.
 - Values are trimmed of leading and trailing whitespace when a config is parsed.
 
 ## License

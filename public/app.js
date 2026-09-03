@@ -50,6 +50,12 @@ const bulkPreviewBtn = document.getElementById("bulk-preview-btn");
 const bulkApplyBtn = document.getElementById("bulk-apply-btn");
 const bulkSelectionCountEl = document.getElementById("bulk-selection-count");
 const bulkResultsEl = document.getElementById("bulk-results");
+const bulkRollbackBtn = document.getElementById("bulk-rollback-btn");
+const historyBtn = document.getElementById("history-btn");
+const historyPanel = document.getElementById("history-panel");
+const historyMetaEl = document.getElementById("history-meta");
+const historyListEl = document.getElementById("history-list");
+const historyCloseBtn = document.getElementById("history-close-btn");
 const bulkProgressEl = document.getElementById("bulk-progress");
 const bulkProgressLabelEl = document.getElementById("bulk-progress-label");
 const bulkProgressBarEl = document.getElementById("bulk-progress-bar");
@@ -549,6 +555,11 @@ async function loadFile(name) {
   }
   updateQuickScopeHints();
 
+  historyBtn.hidden = false;
+  if (!historyPanel.hidden) {
+    await refreshHistory();
+  }
+
   setStatus(`Loaded ${data.fileName}`);
 }
 
@@ -774,17 +785,22 @@ const BULK_STATUS_LABEL = {
 
 function renderBulkResults(data) {
   bulkResultsEl.replaceChildren();
+  bulkRollbackBtn.hidden = true;
 
   const summary = document.createElement("div");
   summary.className = "bulk-summary";
   const counts = data.summary || {};
-  const parts = [
-    `${counts.changed || 0} to change`,
-    `${counts.unchanged || 0} already correct`,
-    `${counts.missing || 0} skipped`,
-    `${counts.error || 0} errors`
-  ];
-  summary.textContent = `${data.dryRun ? "Preview" : "Applied"}: ${parts.join(" | ")}`;
+  const isRollback = data.mode === "rollback";
+  const parts = isRollback
+    ? [`${counts.changed || 0} restored`, `${counts.error || 0} errors`]
+    : [
+      `${counts.changed || 0} to change`,
+      `${counts.unchanged || 0} already correct`,
+      `${counts.missing || 0} skipped`,
+      `${counts.error || 0} errors`
+    ];
+  const heading = isRollback ? "Rolled back" : (data.dryRun ? "Preview" : "Applied");
+  summary.textContent = `${heading}: ${parts.join(" | ")}`;
   bulkResultsEl.appendChild(summary);
 
   const table = document.createElement("table");
@@ -812,7 +828,8 @@ function renderBulkResults(data) {
     tr.appendChild(nameTd);
 
     const statusTd = document.createElement("td");
-    statusTd.textContent = item.error || BULK_STATUS_LABEL[item.status] || item.status;
+    const changedLabel = isRollback ? "Restored" : (data.dryRun ? "Will change" : "Changed");
+    statusTd.textContent = item.error || (item.status === "changed" ? changedLabel : BULK_STATUS_LABEL[item.status] || item.status);
     tr.appendChild(statusTd);
 
     const beforeTd = document.createElement("td");
@@ -866,6 +883,12 @@ async function runBulkJobWithProgress(request, { dryRun, verb }) {
     body: JSON.stringify({ ...request, dryRun })
   });
 
+  return pollJobWithProgress(start.jobId, verb);
+}
+
+/** Polls an already-started job to completion, driving the progress bar. */
+async function pollJobWithProgress(jobId, verb) {
+  const start = { jobId };
   setBulkBusy(true, verb);
 
   try {
@@ -921,7 +944,7 @@ async function applyBulkEdit() {
       ? `delete tag "${request.key}"`
       : `set "${request.key}" to "${request.value}"`);
 
-  if (!confirm(`Write to the PBX now?\n\nThis will ${action} across ${fileCount} selected file${fileCount === 1 ? "" : "s"}.\n\nThis cannot be undone from this app.`)) {
+  if (!confirm(`Write to the PBX now?\n\nThis will ${action} across ${fileCount} selected file${fileCount === 1 ? "" : "s"}.\n\nA copy of each file is kept first, so the batch can be rolled back afterwards.`)) {
     setStatus("Bulk edit cancelled.");
     return;
   }
@@ -929,6 +952,7 @@ async function applyBulkEdit() {
   const job = await runBulkJobWithProgress(request, { dryRun: false, verb: "Applying to" });
 
   renderBulkResults(job);
+  offerBatchRollback(job);
   previewedEdit = null;
   bulkApplyBtn.disabled = true;
 
@@ -951,6 +975,7 @@ async function applyBulkEdit() {
 const LOG_ACTION_LABEL = {
   "bulk-set": "Bulk set",
   "bulk-delete": "Bulk delete",
+  restore: "Restored version",
   "field-changed": "Changed field",
   "field-added": "Added field",
   "field-removed": "Removed field",
@@ -970,6 +995,7 @@ function formatTimestamp(ts) {
 async function refreshLogScopes() {
   const data = await api("/api/logs");
   logScopes = data.scopes || [];
+  connectedScopeKey = data.currentScopeKey || null;
 
   const previous = logScopeSelect.value;
   logScopeSelect.replaceChildren();
@@ -1050,13 +1076,16 @@ function renderLogEntries() {
   const table = document.createElement("table");
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
-  for (const label of ["When", "User", "Action", "Phone", "File", "Tag", "Before", "After", "Result"]) {
+  for (const label of ["When", "User", "Action", "Phone", "File", "Tag", "Before", "After", "Result", ""]) {
     const th = document.createElement("th");
     th.textContent = label;
     headRow.appendChild(th);
   }
   thead.appendChild(headRow);
   table.appendChild(thead);
+
+  // Restoring is only possible on the server we are connected to.
+  const canRestoreHere = Boolean(connectedScopeKey) && connectedScopeKey === logScopeSelect.value;
 
   const tbody = document.createElement("tbody");
   for (const entry of rows) {
@@ -1083,12 +1112,229 @@ function renderLogEntries() {
       tr.appendChild(td);
     }
 
+    // Entries written since snapshots existed can put the file back as it was.
+    const restoreTd = document.createElement("td");
+    restoreTd.className = "restore-cell";
+    if (entry.snapshotId && entry.file) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "secondary small";
+      btn.textContent = "Restore";
+      btn.disabled = !canRestoreHere;
+      btn.title = canRestoreHere
+        ? "Put the file back as it was before this change"
+        : "Connect to this server to restore";
+      btn.addEventListener("click", () => {
+        restoreVersion(entry.file, entry.snapshotId).catch((error) => setStatus(error.message, true));
+      });
+      restoreTd.appendChild(btn);
+    }
+    tr.appendChild(restoreTd);
+
     tbody.appendChild(tr);
   }
 
   table.appendChild(tbody);
   logResultsEl.appendChild(table);
 }
+
+// --- version history and rollback -------------------------------------------------
+
+let connectedScopeKey = null;
+let lastAppliedJob = null;
+
+const SNAPSHOT_REASON_LABEL = {
+  save: "before an editor save",
+  bulk: "before a bulk edit",
+  restore: "before a restore"
+};
+
+// Mirrors the server's change-log redaction so a confirm dialog never shows a password.
+const SENSITIVE_TAG_RE = /passwd|password|passphrase|secret/i;
+
+function describeVersion(version) {
+  const reason = SNAPSHOT_REASON_LABEL[version.reason] || version.reason;
+  return `${formatTimestamp(version.ts)} (kept ${reason}${version.user ? ` by ${version.user}` : ""})`;
+}
+
+async function refreshHistory() {
+  if (!currentFile) {
+    historyListEl.replaceChildren();
+    historyMetaEl.textContent = "No file loaded";
+    return;
+  }
+
+  const data = await api(`/api/files/${encodeURIComponent(currentFile)}/history`);
+  renderHistory(data);
+}
+
+function renderHistory(data) {
+  historyListEl.replaceChildren();
+  const versions = data.versions || [];
+  historyMetaEl.textContent = `${versions.length} of up to ${data.keep} kept for ${data.fileName}`;
+
+  if (versions.length === 0) {
+    const p = document.createElement("p");
+    p.className = "empty-state";
+    p.textContent = "No earlier versions yet. One is kept each time this file is written through this app.";
+    historyListEl.appendChild(p);
+    return;
+  }
+
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["Version", "Kept", "By", "Phone", "Size", ""]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const version of versions) {
+    const tr = document.createElement("tr");
+    const cells = [
+      formatTimestamp(version.ts),
+      SNAPSHOT_REASON_LABEL[version.reason] || version.reason,
+      version.user || "-",
+      version.station || "-",
+      `${version.size} bytes`
+    ];
+    for (const text of cells) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+
+    const actionTd = document.createElement("td");
+    actionTd.className = "restore-cell";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "secondary small";
+    btn.textContent = "Restore";
+    btn.addEventListener("click", () => {
+      restoreVersion(data.fileName, version.id).catch((error) => setStatus(error.message, true));
+    });
+    actionTd.appendChild(btn);
+    tr.appendChild(actionTd);
+
+    tbody.appendChild(tr);
+  }
+
+  table.appendChild(tbody);
+  historyListEl.appendChild(table);
+}
+
+/** Shows exactly what would change, then writes the stored version back to the PBX. */
+async function restoreVersion(fileName, versionId) {
+  const detail = await api(`/api/files/${encodeURIComponent(fileName)}/history/${encodeURIComponent(versionId)}`);
+  const diff = detail.diff || [];
+  const shown = diff.slice(0, 8).map((change) => {
+    const hide = SENSITIVE_TAG_RE.test(change.key);
+    const before = hide ? "(hidden)" : (change.before ?? "(not set)");
+    const after = hide ? "(hidden)" : (change.after ?? "(removed)");
+    return `  ${change.key}: ${before} -> ${after}`;
+  });
+  if (diff.length > shown.length) {
+    shown.push(`  ...and ${diff.length - shown.length} more`);
+  }
+
+  let effect;
+  if (!detail.currentExists) {
+    effect = "The file no longer exists on the PBX; it will be recreated from this version.";
+  } else if (diff.length === 0) {
+    effect = "The file on the PBX already matches this version field for field.";
+  } else {
+    effect = `This will change ${diff.length} field${diff.length === 1 ? "" : "s"}:\n${shown.join("\n")}`;
+  }
+
+  const ok = confirm(
+    `Restore ${fileName} to the version from ${describeVersion(detail.version)}?\n\n${effect}\n\n`
+      + "The current file is kept first, so this can be undone."
+  );
+  if (!ok) {
+    setStatus("Restore cancelled.");
+    return;
+  }
+
+  const result = await api(`/api/files/${encodeURIComponent(fileName)}/restore`, {
+    method: "POST",
+    body: JSON.stringify({ snapshotId: versionId })
+  });
+
+  setStatus(`${result.message || `Restored ${fileName}`} (${result.changes} field${result.changes === 1 ? "" : "s"} changed).`);
+
+  await refreshFiles();
+  await refreshLogScopes();
+  if (currentFile === fileName) {
+    await loadFile(fileName);
+  } else if (!historyPanel.hidden) {
+    await refreshHistory();
+  }
+}
+
+function offerBatchRollback(job) {
+  const possible = !job.dryRun
+    && job.mode !== "rollback"
+    && (job.results || []).some((item) => item.status === "changed" && item.snapshotId);
+  lastAppliedJob = possible ? job : null;
+  bulkRollbackBtn.hidden = !possible;
+}
+
+async function rollbackBatch() {
+  const job = lastAppliedJob;
+  if (!job) {
+    return;
+  }
+
+  const count = job.results.filter((item) => item.status === "changed" && item.snapshotId).length;
+  const ok = confirm(
+    `Roll back this batch?\n\n${count} file${count === 1 ? "" : "s"} will be put back to the copy taken just before `
+      + "the bulk edit was applied. Anything changed in those files since then is overwritten.\n\n"
+      + "The current files are kept first, so each one can still be restored from History."
+  );
+  if (!ok) {
+    setStatus("Roll back cancelled.");
+    return;
+  }
+
+  const start = await api(`/api/bulk-edit/${encodeURIComponent(job.jobId)}/rollback`, { method: "POST" });
+  const result = await pollJobWithProgress(start.jobId, "Rolling back");
+
+  renderBulkResults(result);
+  lastAppliedJob = null;
+
+  const restored = result.summary?.changed || 0;
+  const errors = result.summary?.error || 0;
+  setStatus(`Rolled back ${restored} file${restored === 1 ? "" : "s"}${errors ? `, ${errors} failed` : ""}.`, errors > 0);
+
+  await refreshFiles();
+  await refreshLogScopes();
+  if (currentFile && job.results.some((item) => item.name === currentFile)) {
+    await loadFile(currentFile);
+  }
+}
+
+historyBtn.addEventListener("click", async () => {
+  historyPanel.hidden = !historyPanel.hidden;
+  if (!historyPanel.hidden) {
+    try {
+      await refreshHistory();
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  }
+});
+
+historyCloseBtn.addEventListener("click", () => {
+  historyPanel.hidden = true;
+});
+
+bulkRollbackBtn.addEventListener("click", () => {
+  rollbackBatch().catch((error) => setStatus(error.message, true));
+});
 
 function exportLogCsv() {
   const rows = getFilteredLogEntries();
@@ -1252,6 +1498,11 @@ async function handleDisconnectClick() {
   try {
     await disconnectFromServer();
     currentFile = "";
+    historyBtn.hidden = true;
+    historyPanel.hidden = true;
+    connectedScopeKey = null;
+    bulkRollbackBtn.hidden = true;
+    renderLogEntries();
     fileListEl.innerHTML = "";
     clearRows();
     setBaseline("flat-profile", []);

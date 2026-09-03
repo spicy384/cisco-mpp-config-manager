@@ -47,6 +47,9 @@ const { createAuth } = require("./auth-routes");
 const { resolveTlsOptions } = require("./tls-setup");
 const { quickSchema } = require("./public/quick-config");
 const authGuard = createAuth({ dataDir: DATA_DIR });
+const { createHostKeyStore } = require("./host-keys");
+// SSH host keys are remembered on first connection and checked on every later one.
+const hostKeys = createHostKeyStore({ dataDir: DATA_DIR });
 
 // Auth endpoints are mounted first: they must be reachable while signed out.
 app.use(authGuard.router);
@@ -1130,18 +1133,33 @@ app.post("/api/connect", async (req, res) => {
     } catch (_) {
       // Ignore close errors when re-connecting.
     }
+    // Drop the old state now: if the new connection fails, the app must report
+    // itself disconnected rather than pointing at a closed client.
+    sftp = null;
+    connection = null;
   }
 
   const client = new SftpClient();
+  const hostPort = Number(target.port) || 22;
+  const hostKey = hostKeys.verifierFor(target.host, hostPort);
 
   try {
-    await client.connect({
-      host: target.host,
-      port: Number(target.port) || 22,
-      username: target.username,
-      password,
-      readyTimeout: 15000
-    });
+    try {
+      await client.connect({
+        host: target.host,
+        port: hostPort,
+        username: target.username,
+        password,
+        readyTimeout: 15000,
+        hostVerifier: hostKey.verifier
+      });
+    } catch (error) {
+      // ssh2 only says "verification failed"; the store knows what actually differed.
+      if (hostKey.outcome.status === "mismatch") {
+        throw hostKeys.mismatchError(target.host, hostPort, hostKey.outcome);
+      }
+      throw error;
+    }
 
     const exists = await client.exists(target.remoteDir);
     if (!exists) {
@@ -1158,7 +1176,8 @@ app.post("/api/connect", async (req, res) => {
       profileId: target.id || null,
       profileName: target.name || null,
       // Used by the Quick editor when building speed dial and BLF targets.
-      sipServer: target.sipServer || ""
+      sipServer: target.sipServer || "",
+      hostKey: { fingerprint: hostKey.outcome.fingerprint, status: hostKey.outcome.status }
     };
 
     return res.json({
@@ -1173,8 +1192,36 @@ app.post("/api/connect", async (req, res) => {
       // Ignore close errors.
     }
 
+    if (error.code === "HOST_KEY_MISMATCH") {
+      return res.status(409).json({
+        error: error.message,
+        hostKeyMismatch: true,
+        host: error.host,
+        port: error.port,
+        expected: error.expected,
+        actual: error.actual
+      });
+    }
+
     return res.status(500).json({ error: error.message || "Connection failed." });
   }
+});
+
+// Remembered SSH host keys. Forgetting one is an administrator action because it is
+// the only way to make the app accept a changed key.
+app.get("/api/known-hosts", authGuard.requireAdmin, (req, res) => {
+  res.json({ hosts: hostKeys.list() });
+});
+
+app.post("/api/known-hosts/forget", authGuard.requireAdmin, (req, res) => {
+  const host = String(req.body?.host || "").trim();
+  if (!host) {
+    return res.status(400).json({ error: "host is required." });
+  }
+
+  const port = Number(req.body?.port) || 22;
+  const forgotten = hostKeys.forget(host, port);
+  res.json({ ok: true, forgotten, host, port });
 });
 
 app.get("/api/status", (req, res) => {

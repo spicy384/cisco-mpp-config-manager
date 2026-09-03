@@ -6,6 +6,13 @@ const connectForm = document.getElementById("connect-form");
 const disconnectBtn = document.getElementById("disconnect-btn");
 const collapseConnectionBtn = document.getElementById("collapse-connection-btn");
 const disconnectMiniBtn = document.getElementById("disconnect-mini-btn");
+const connectedFingerprintEl = document.getElementById("connected-fingerprint");
+const hostKeyWarning = document.getElementById("host-key-warning");
+const hostKeyMessageEl = document.getElementById("host-key-message");
+const hostKeyExpectedEl = document.getElementById("host-key-expected");
+const hostKeyActualEl = document.getElementById("host-key-actual");
+const forgetHostKeyBtn = document.getElementById("forget-host-key-btn");
+const hostKeyAdminNote = document.getElementById("host-key-admin-note");
 const expandConnectionBtn = document.getElementById("expand-connection-btn");
 const refreshBtn = document.getElementById("refresh-btn");
 const fileListEl = document.getElementById("file-list");
@@ -151,7 +158,29 @@ function setConnectionCollapsed(collapsed, connectionData = null) {
     const cleanedSelected = selectedLabel.replace(/ \(.+\)$/, "");
     const displayName = info?.profileName || serverNameInput.value.trim() || cleanedSelected || info?.host || "Connected";
     connectedServerNameEl.textContent = displayName;
+    connectedFingerprintEl.textContent = info?.hostKey?.fingerprint || "";
   }
+}
+
+// The connection was refused because the PBX presented a different SSH key than the
+// one remembered. Show both fingerprints; only an administrator can clear the old one.
+let pendingHostKeyMismatch = null;
+
+function showHostKeyWarning(details) {
+  pendingHostKeyMismatch = details;
+  hostKeyMessageEl.textContent = `${details.host}:${details.port} presented a key that does not match the one remembered from earlier connections.`;
+  hostKeyExpectedEl.textContent = details.expected || "(none)";
+  hostKeyActualEl.textContent = details.actual || "(unknown)";
+
+  const isAdmin = currentUser?.role === "admin";
+  forgetHostKeyBtn.hidden = !isAdmin;
+  hostKeyAdminNote.hidden = isAdmin;
+  hostKeyWarning.hidden = false;
+}
+
+function hideHostKeyWarning() {
+  pendingHostKeyMismatch = null;
+  hostKeyWarning.hidden = true;
 }
 
 let csrfToken = null;
@@ -178,7 +207,12 @@ async function api(path, options = {}) {
       throw new Error(data.setupRequired ? "Setup required." : "Your session has expired. Sign in again.");
     }
 
-    throw new Error(data.error || `Request failed (${res.status})`);
+    // Callers that need more than the message (e.g. the host-key mismatch details)
+    // can read the full response from the error.
+    const error = new Error(data.error || `Request failed (${res.status})`);
+    error.status = res.status;
+    error.data = data;
+    throw error;
   }
 
   return data;
@@ -1136,6 +1170,8 @@ connectForm.addEventListener("submit", async (e) => {
     delete body.remoteDir;
   }
 
+  hideHostKeyWarning();
+
   try {
     const data = await api("/api/connect", {
       method: "POST",
@@ -1150,10 +1186,43 @@ connectForm.addEventListener("submit", async (e) => {
     lastConnectionInfo = data.connection || null;
     setConnectionCollapsed(true, data.connection || null);
 
-    setStatus(data.message || "Connected");
+    const hostKey = data.connection?.hostKey;
+    setStatus(hostKey?.status === "new"
+      ? `${data.message || "Connected"}. First connection: host key ${hostKey.fingerprint} has been remembered.`
+      : (data.message || "Connected"));
     await refreshFiles();
     // Switch the log viewer to the server we just connected to.
     await refreshLogScopes();
+  } catch (error) {
+    if (error.data?.hostKeyMismatch) {
+      showHostKeyWarning(error.data);
+    }
+    setStatus(error.message, true);
+  }
+});
+
+forgetHostKeyBtn.addEventListener("click", async () => {
+  const details = pendingHostKeyMismatch;
+  if (!details) {
+    return;
+  }
+
+  const confirmed = window.confirm(
+    `Forget the stored key for ${details.host}:${details.port} and trust the new one?\n\n`
+      + "Only do this if you have confirmed the fingerprint on the PBX itself."
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await api("/api/known-hosts/forget", {
+      method: "POST",
+      body: JSON.stringify({ host: details.host, port: details.port })
+    });
+    hideHostKeyWarning();
+    // The password is still in the form, so reconnecting is a re-submit.
+    connectForm.requestSubmit();
   } catch (error) {
     setStatus(error.message, true);
   }

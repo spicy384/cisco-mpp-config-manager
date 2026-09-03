@@ -130,6 +130,7 @@
       <div id="connection-summary" class="connection-summary" hidden>
         <span class="conn-dot" aria-hidden="true"></span>
         <strong id="connected-server-name">Connected</strong>
+        <span id="connected-fingerprint" class="fingerprint" title="SSH host key fingerprint"></span>
         <button type="button" id="expand-connection-btn" class="secondary small">Expand</button>
         <button type="button" id="disconnect-mini-btn" class="secondary small">Disconnect</button>
       </div>
@@ -166,6 +167,28 @@
           <button type="button" id="delete-server-btn" class="ghost-danger">Delete Server</button>
         </div>
       </form>
+
+      <div id="host-key-warning" class="host-key-warning" role="alert" hidden>
+        <strong>SSH host key changed</strong>
+        <p id="host-key-message"></p>
+        <dl class="fingerprints">
+          <dt>Remembered</dt>
+          <dd id="host-key-expected"></dd>
+          <dt>Presented now</dt>
+          <dd id="host-key-actual"></dd>
+        </dl>
+        <p class="host-key-help">
+          Before trusting the new key, compare it with the output of
+          <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> run on the PBX itself
+          (use the key file matching the type in use).
+        </p>
+        <div class="actions">
+          <button type="button" id="forget-host-key-btn" class="danger">Forget stored key and reconnect</button>
+        </div>
+        <p id="host-key-admin-note" class="host-key-help" hidden>
+          Only an administrator can forget a stored host key.
+        </p>
+      </div>
       <p id="status" role="status">Not connected</p>
     </section>
 

@@ -8,6 +8,8 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
 - Sign-in with per-user accounts, optional TOTP two-factor and single-use recovery codes
 - Administrator and user roles; every write is attributed to the user who made it
 - Can run behind an authentication reverse proxy instead (Authelia, Authentik, oauth2-proxy)
+- SSH host keys are remembered on first connection and checked every time after, so the
+  PBX password is never sent to a host that is not the one you connected to before
 
 **Editing**
 - Quick editor for everyday changes - set a line, speed dial, BLF or wallpaper without
@@ -270,7 +272,7 @@ offers to enrol two-factor straight away.
 ### Roles
 | Role | Can do |
 |---|---|
-| Administrator | Everything, plus add/remove users and reset another user's two-factor |
+| Administrator | Everything, plus add/remove users, reset another user's two-factor and forget a changed SSH host key |
 | User | Connect to a PBX, edit and bulk edit configs, read the change log |
 
 Every write records **which user made it** in the Change Log. Entries written before
@@ -281,6 +283,25 @@ An administrator opens **Users** and clicks **Reset MFA**. That user can then si
 their password alone and enrol again. If the *only* administrator is locked out, stop the
 container, edit `users.json` in the data directory, set `"mfaEnrolled": false` and
 `"totpSecret": null` on that account, and start it again.
+
+### SSH host keys
+The app works like OpenSSH's `known_hosts`. The first time it connects to a PBX it
+records the SSH host key fingerprint (shown in the connection bar, in the same
+`SHA256:...` form as `ssh-keygen -lf`). Every later connection must present the same
+key, or the connection is refused **before the password is sent** and both fingerprints
+are shown.
+
+A changed key means one of two things: the PBX was rebuilt or its SSH keys regenerated,
+or something between you and the PBX is intercepting the connection. Check the new
+fingerprint against the PBX itself before trusting it:
+
+```bash
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+```
+
+(Use the key file matching the type the server negotiated - `ed25519`, `ecdsa` or
+`rsa`.) If it matches, an administrator clicks **Forget stored key and reconnect**.
+Remembered keys live in `known-hosts.json` in the data directory.
 
 ### HTTPS
 The app serves plain HTTP by default, which is fine on loopback. Turn on TLS when anything
@@ -468,9 +489,9 @@ gitignored) or point `DEFAULT_TEMPLATE_PATH` at it. Either takes precedence over
 - The **SFTP connection is shared**: once someone connects, any signed-in user works through
   that connection. The change log records who did what, but users are not isolated from one
   another. Give accounts only to people you would trust with the PBX password.
-- The `data/` directory holds accounts, sessions, saved servers, templates and the change
-  log. It is gitignored and must stay that way - it contains password hashes, TOTP secrets
-  and templates that may carry phone admin passwords.
+- The `data/` directory holds accounts, sessions, saved servers, templates, remembered SSH
+  host keys and the change log. It is gitignored and must stay that way - it contains
+  password hashes, TOTP secrets and templates that may carry phone admin passwords.
 - Values are trimmed of leading and trailing whitespace when a config is parsed.
 
 ## License

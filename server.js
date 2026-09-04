@@ -66,6 +66,12 @@ const {
   buildResyncCommand,
   classifyResyncOutput
 } = require("./resync");
+const {
+  validateStatusCommand,
+  resolveStatusCommand,
+  parseRegistrations,
+  statusForExtension
+} = require("./registration");
 
 // Auth endpoints are mounted first: they must be reachable while signed out.
 app.use(authGuard.router);
@@ -334,6 +340,8 @@ function sanitizeServerProfile(input) {
   // "use the default" so a later change to the default reaches every profile; throws
   // if a typed template is unusable.
   const resyncCommand = validateResyncCommand(input?.resyncCommand);
+  // How to list registered phones. Blank means "pjsip show contacts".
+  const statusCommand = validateStatusCommand(input?.statusCommand);
 
   if (!name || !host || !username || !remoteDir) {
     throw new Error("name, host, username, and remoteDir are required.");
@@ -351,7 +359,8 @@ function sanitizeServerProfile(input) {
     username,
     remoteDir,
     sipServer,
-    resyncCommand
+    resyncCommand,
+    statusCommand
   };
 }
 
@@ -795,7 +804,8 @@ async function restoreSnapshot(fileName, snapshotId, user = "") {
   setFileMetadataCacheEntry(buildCacheKey(fileName), {
     size: Buffer.byteLength(snapshot.content, "utf8"),
     modified: Date.now(),
-    stationDisplayName: findStationDisplayNameInEntries(restoredEntries)
+    stationDisplayName: findStationDisplayNameInEntries(restoredEntries),
+    extension: findLineExtension(restoredEntries) || ""
   });
 
   const changes = diffEntriesForLog(previousEntries, restoredEntries);
@@ -1016,7 +1026,8 @@ async function runBulkJob(job) {
         setFileMetadataCacheEntry(buildCacheKey(fileName), {
           size: Buffer.byteLength(nextXml, "utf8"),
           modified: Date.now(),
-          stationDisplayName: findStationDisplayNameInEntries(working)
+          stationDisplayName: findStationDisplayNameInEntries(working),
+          extension: findLineExtension(working) || ""
         });
       }
 
@@ -1493,6 +1504,7 @@ app.post("/api/connect", async (req, res) => {
       // Used by the Quick editor when building speed dial and BLF targets.
       sipServer: target.sipServer || "",
       resyncCommand: resolveResyncCommand(target.resyncCommand),
+      statusCommand: resolveStatusCommand(target.statusCommand),
       hostKey: { fingerprint: hostKey.outcome.fingerprint, status: hostKey.outcome.status }
     };
 
@@ -1564,23 +1576,27 @@ app.get("/api/files", async (req, res) => {
       const cacheKey = buildCacheKey(item.name);
       const cached = fileMetadataCache.get(cacheKey);
 
-      if (cached && cached.size === item.size && cached.modified === item.modifyTime) {
+      // Entries cached before extensions were tracked are re-read once.
+      if (cached && cached.size === item.size && cached.modified === item.modifyTime && cached.extension !== undefined) {
         files.push({
           name: item.name,
           size: item.size,
           modified: item.modifyTime,
-          stationDisplayName: cached.stationDisplayName || ""
+          stationDisplayName: cached.stationDisplayName || "",
+          extension: cached.extension || ""
         });
         continue;
       }
 
       const remotePath = path.posix.join(connection.remoteDir, item.name);
       let stationDisplayName = "";
+      let extension = "";
 
       try {
         const content = await sftp.get(remotePath);
         const xmlText = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
         stationDisplayName = extractStationDisplayName(xmlText);
+        extension = findLineExtension(xmlToEntries(xmlText).entries) || "";
       } catch (_) {
         stationDisplayName = "";
       }
@@ -1588,14 +1604,16 @@ app.get("/api/files", async (req, res) => {
       setFileMetadataCacheEntry(cacheKey, {
         size: item.size,
         modified: item.modifyTime,
-        stationDisplayName
+        stationDisplayName,
+        extension
       });
 
       files.push({
         name: item.name,
         size: item.size,
         modified: item.modifyTime,
-        stationDisplayName
+        stationDisplayName,
+        extension
       });
     }
 
@@ -1673,7 +1691,8 @@ app.post("/api/files/:name", authGuard.requireWriter, async (req, res) => {
     setFileMetadataCacheEntry(buildCacheKey(fileName), {
       size: Buffer.byteLength(xml, "utf8"),
       modified: Date.now(),
-      stationDisplayName
+      stationDisplayName,
+      extension: findLineExtension(entries) || ""
     });
 
     // Identify the phone by its station name as it was before this save, falling back to
@@ -1773,6 +1792,72 @@ app.post("/api/files/:name/restore", authGuard.requireWriter, async (req, res) =
   }
 });
 
+// --- registration status -----------------------------------------------------
+// The PBX is asked at most every few seconds however often the browser polls.
+const REGISTRATION_TTL_MS = 5000;
+let registrationCache = null;
+
+async function fetchRegistrations(force = false) {
+  const scopeKey = buildLogScope(connection).key;
+  const now = Date.now();
+  if (!force && registrationCache && registrationCache.scopeKey === scopeKey && now - registrationCache.fetchedAt < REGISTRATION_TTL_MS) {
+    return registrationCache;
+  }
+
+  const command = connection.statusCommand;
+  const output = await execOverSsh(sftp.client, command);
+  const parsed = parseRegistrations(`${output.stdout}${output.stderr ? `\n${output.stderr}` : ""}`);
+
+  registrationCache = {
+    scopeKey,
+    fetchedAt: now,
+    command,
+    format: parsed.format,
+    exitCode: output.code,
+    contacts: parsed.contacts,
+    // Raw output only when nothing could be parsed, so the reason is visible.
+    output: parsed.format === "unknown" ? `${output.stdout}${output.stderr}`.trim().slice(0, 2000) : ""
+  };
+  return registrationCache;
+}
+
+app.get("/api/registrations", async (req, res) => {
+  try {
+    ensureConnected();
+    const data = await fetchRegistrations(req.query.refresh === "1");
+
+    // Map every known file to its phone's status via the cached line 1 extension.
+    const scope = `${buildCacheScope()}/`;
+    const files = {};
+    let withExtension = 0;
+    let online = 0;
+    for (const [key, meta] of fileMetadataCache.entries()) {
+      if (!key.startsWith(scope) || !meta || !meta.extension) {
+        continue;
+      }
+      const fileName = key.slice(scope.length);
+      const status = statusForExtension(data.contacts, meta.extension);
+      files[fileName] = status;
+      withExtension += 1;
+      if (status.status === "online") {
+        online += 1;
+      }
+    }
+
+    res.json({
+      fetchedAt: data.fetchedAt,
+      command: data.command,
+      format: data.format,
+      contacts: Object.keys(data.contacts).length,
+      output: data.output,
+      summary: { withExtension, online },
+      files
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // --- resync -----------------------------------------------------------------
 app.post("/api/files/:name/resync", authGuard.requireWriter, async (req, res) => {
   try {
@@ -1832,7 +1917,8 @@ app.post("/api/files", authGuard.requireWriter, async (req, res) => {
     setFileMetadataCacheEntry(buildCacheKey(fileName), {
       size: Buffer.byteLength(xml, "utf8"),
       modified: Date.now(),
-      stationDisplayName
+      stationDisplayName,
+      extension: findLineExtension(entries) || ""
     });
 
     appendLogEntries(buildLogScope(connection), [{

@@ -166,6 +166,9 @@
           <button type="button" id="resync-test-btn" class="secondary writer-only">Test Resync</button>
         </div>
         <pre id="resync-test-output" class="resync-output" hidden></pre>
+        <label>Registration status command (optional - lists registered phones; blank for PJSIP)
+          <input id="status-command" placeholder='asterisk -rx "pjsip show contacts"' />
+        </label>
         <label>Password (required to connect) <input name="password" type="password" required /></label>
 
         <div class="actions">
@@ -207,6 +210,7 @@
         <div class="panel-head">
           <h2>XML Files</h2>
           <span id="files-count" class="badge">0 files</span>
+          <span id="reg-count" class="badge reg-badge" hidden></span>
         </div>
 
         <label class="search-field">Search XML Files

@@ -17,7 +17,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY server.js auth.js auth-routes.js tls-setup.js host-keys.js snapshots.js resync.js ./
+COPY server.js auth.js auth-routes.js tls-setup.js host-keys.js snapshots.js resync.js registration.js ./
 COPY public ./public
 # Bundled placeholder template; a real one mounted at /data takes precedence.
 COPY examples ./examples

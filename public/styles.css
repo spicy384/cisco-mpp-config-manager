@@ -525,6 +525,41 @@ body.theme-dark .icon-moon { display: inline; }
   max-width: 60ch;
 }
 
+.reg-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 7px;
+  border-radius: 999px;
+  vertical-align: 1px;
+  background: var(--border-strong);
+}
+
+.reg-dot.reg-online {
+  background: var(--success);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--success) 25%, transparent);
+}
+
+.reg-dot.reg-unreachable {
+  background: #d97706;
+}
+
+.reg-dot.reg-unknown {
+  background: var(--text-muted);
+}
+
+.reg-badge-ok {
+  color: var(--success);
+}
+
+.reg-badge-partial {
+  color: #b45309;
+}
+
+.reg-badge-error {
+  color: var(--danger);
+}
+
 .resync-test {
   display: flex;
   align-items: flex-end;

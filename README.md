@@ -32,6 +32,8 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
   **History** or straight from the change log, or roll back a whole bulk batch in one go
 - Tell a phone to fetch its new configuration - one phone with **Resync Phone**, or every
   phone a bulk edit changed with a tick box - using the SSH connection already open
+- See which phones are actually registered: a status dot and address next to every phone in
+  the list, read from the PBX and refreshed every minute
 
 ## Quick editor
 The editor has two tabs. **Quick** covers the changes you make most often without needing to
@@ -219,6 +221,23 @@ Resync is always a separate, deliberate step:
   A rollback does not resync; resync the affected phones afterwards if you need to.
 - A phone with no line 1 extension is skipped and says so. Every resync, sent, skipped or
   failed, is a row in the change log.
+
+### Which phones are online
+While connected, the file list shows a dot next to every phone that has a line 1 extension:
+green when the PBX has it registered and answering, amber when it is registered but not
+responding to qualify, grey when the PBX has no registration for it. Hover for the address it
+registered from and the round-trip time; the badge in the panel header gives the count. The
+list is refreshed when it loads, every minute while the page is visible, and on **Refresh**.
+
+It is read from the PBX with the profile's *Registration status command*, by default:
+
+```
+asterisk -rx "pjsip show contacts"
+```
+
+For a chan_sip PBX set it to `asterisk -rx "sip show peers"`; both formats are understood.
+If the PBX returns something else the badge says *Status unavailable* and hovering it shows
+what the PBX printed.
 
 ### If resync does not work
 Use **Test Resync** in the Connection panel while connected: it runs the command for an

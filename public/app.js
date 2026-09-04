@@ -64,6 +64,8 @@ const resyncBtn = document.getElementById("resync-btn");
 const resyncTopBtn = document.getElementById("resync-top-btn");
 const resyncQuickBtn = document.getElementById("resync-quick-btn");
 const saveQuickBtn = document.getElementById("save-quick-btn");
+const statusCommandInput = document.getElementById("status-command");
+const regCountEl = document.getElementById("reg-count");
 const bulkResyncInput = document.getElementById("bulk-resync");
 const bulkProgressEl = document.getElementById("bulk-progress");
 const bulkProgressLabelEl = document.getElementById("bulk-progress-label");
@@ -433,7 +435,15 @@ function renderFileList(files) {
     details.className = "file-details";
     // Station name leads: file names are MAC addresses and identify nothing on their own.
     // textContent throughout: station names come from remote files and must not be parsed as HTML.
-    details.appendChild(makeFileRowDiv("file-station", station));
+    const stationRow = makeFileRowDiv("file-station", station);
+    const reg = registrations?.files?.[file.name];
+    if (reg) {
+      const dot = document.createElement("span");
+      dot.className = `reg-dot reg-${reg.status}`;
+      dot.title = describeRegistration(reg);
+      stationRow.prepend(dot);
+    }
+    details.appendChild(stationRow);
     details.appendChild(makeFileRowDiv("file-name", file.name, true));
     details.appendChild(makeFileRowDiv("file-size", `${(file.size || 0).toLocaleString()} bytes`));
 
@@ -525,6 +535,7 @@ function fillFormFromServer(serverId) {
   connectForm.elements.remoteDir.value = server.remoteDir || "";
   sipServerInput.value = server.sipServer || "";
   resyncCommandInput.value = server.resyncCommand || "";
+  statusCommandInput.value = server.statusCommand || "";
 }
 
 async function refreshFiles() {
@@ -546,7 +557,70 @@ async function refreshFiles() {
   } finally {
     setFilesLoading(false);
   }
+
+  // Registration status rides along with the list; a failure must not break the list.
+  refreshRegistrations().catch((error) => {
+    regCountEl.hidden = false;
+    regCountEl.textContent = "Status unavailable";
+    regCountEl.title = error.message;
+  });
 }
+
+// --- registration status -----------------------------------------------------------
+
+let registrations = null;
+const REGISTRATION_POLL_MS = 60000;
+
+const REG_LABEL = {
+  online: "Registered",
+  unreachable: "Registered but not responding",
+  unknown: "Registered, status unknown",
+  unregistered: "Not registered"
+};
+
+function describeRegistration(reg) {
+  const parts = [`${REG_LABEL[reg.status] || reg.status} (${reg.ext})`];
+  if (reg.ip) {
+    parts.push(`from ${reg.ip}${reg.port ? `:${reg.port}` : ""}`);
+  }
+  if (reg.rtt !== null && reg.rtt !== undefined) {
+    parts.push(`RTT ${reg.rtt} ms`);
+  }
+  return parts.join(" - ");
+}
+
+async function refreshRegistrations(force = false) {
+  if (!lastConnectionInfo) {
+    registrations = null;
+    regCountEl.hidden = true;
+    return;
+  }
+
+  registrations = await api(`/api/registrations${force ? "?refresh=1" : ""}`);
+  const { withExtension, online } = registrations.summary || { withExtension: 0, online: 0 };
+
+  regCountEl.hidden = false;
+  if (registrations.format === "unknown") {
+    regCountEl.textContent = "Status unavailable";
+    regCountEl.title = registrations.output
+      ? `The PBX did not return a contact list:\n${registrations.output}`
+      : "The PBX returned nothing for the registration status command.";
+    regCountEl.className = "badge reg-badge reg-badge-error";
+  } else {
+    regCountEl.textContent = `${online} of ${withExtension} registered`;
+    regCountEl.title = `As of ${formatTimestamp(registrations.fetchedAt)} via ${registrations.command}`;
+    regCountEl.className = `badge reg-badge ${online === withExtension ? "reg-badge-ok" : "reg-badge-partial"}`;
+  }
+
+  renderFileList(getFilteredFiles());
+}
+
+// Keep the dots fresh while someone is looking at the page.
+setInterval(() => {
+  if (lastConnectionInfo && document.visibilityState === "visible") {
+    refreshRegistrations().catch(() => {});
+  }
+}, REGISTRATION_POLL_MS);
 
 async function loadFile(name) {
   const data = await api(`/api/files/${encodeURIComponent(name)}`);
@@ -723,7 +797,8 @@ async function saveServerProfile() {
     username,
     remoteDir,
     sipServer: sipServerInput.value.trim(),
-    resyncCommand: resyncCommandInput.value.trim()
+    resyncCommand: resyncCommandInput.value.trim(),
+    statusCommand: statusCommandInput.value.trim()
   };
 
   const data = await api("/api/servers", {
@@ -1656,6 +1731,8 @@ async function handleDisconnectClick() {
   try {
     await disconnectFromServer();
     currentFile = "";
+    registrations = null;
+    regCountEl.hidden = true;
     historyBtn.hidden = true;
     historyPanel.hidden = true;
     connectedScopeKey = null;
@@ -1694,6 +1771,7 @@ themeToggleBtn.addEventListener("click", () => {
 refreshBtn.addEventListener("click", async () => {
   try {
     await refreshFiles();
+    await refreshRegistrations(true).catch(() => {});
     setStatus("List refreshed");
   } catch (error) {
     setStatus(error.message, true);

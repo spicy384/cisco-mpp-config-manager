@@ -22,7 +22,8 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
 - `Ctrl`/`Cmd`+`S` to save; Save buttons at the top and bottom of the editor
 - A save is refused if the file changed on the PBX since it was opened, naming the last
   writer, so two people editing the same phone cannot silently overwrite each other
-- Create new config files from a template and upload them
+- Create new config files from a template and upload them, or **clone** an existing phone:
+  give it a MAC and an extension and everything else is copied
 
 **Bulk changes and history**
 - Find every phone whose config has a given tag or value - which phones still point at the old
@@ -121,6 +122,20 @@ Safety behaviour:
   **not** rewritten, so untouched files keep their existing formatting.
 - One unreadable or unwritable file does not abort the batch; it is reported as an error
   and the remaining files still process.
+
+## Cloning a phone
+The quickest way to provision a phone like one you already have. Open the phone to copy,
+press **Clone**, and fill in:
+
+- the new phone's MAC address (any notation; it becomes `spa<mac>.xml`) or a file name,
+- its line 1 extension,
+- optionally a line 1 display name, SIP password and station display name.
+
+Every other setting is copied. Blank fields keep the source's value, including the SIP
+password, so give the new phone its own. The short name on line 1 follows the new extension
+or display name if it mirrored the old one. Keys that point at the source phone itself (a BLF
+to its own extension, say) are copied as they are; adjust those in the Quick editor if needed.
+The new file is logged as *Created ... cloned from ...* and opened in the editor.
 
 ## Find in configs
 **Find in Configs** searches every phone config on the PBX for a tag, a value, or both, and

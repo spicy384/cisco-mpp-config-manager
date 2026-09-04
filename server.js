@@ -890,6 +890,63 @@ async function resyncChangedPhones(job) {
   job.currentFile = null;
 }
 
+// --- clone a phone --------------------------------------------------------------
+const PHONE_FILE_PATTERN = /^spa.*\.xml$/i;
+
+function setEntryValue(entries, key, value, attributes = { ua: "na" }) {
+  const index = entries.findIndex((e) => e.key === key);
+  if (index >= 0) {
+    entries[index] = { ...entries[index], value: String(value) };
+  } else {
+    entries.push({ key, value: String(value), attributes });
+  }
+}
+
+function entryValue(entries, key) {
+  const found = entries.find((e) => e.key === key);
+  return found ? String(found.value == null ? "" : found.value).trim() : "";
+}
+
+/**
+ * A new phone's config from an existing one: everything copied, line 1 re-pointed
+ * at the new extension. Blank overrides keep the source's value, except that the
+ * short name follows whichever of the extension or display name it mirrored.
+ */
+function buildClonedEntries(sourceEntries, { ext, displayName = "", password = "", station = "" } = {}) {
+  const extension = String(ext || "").trim();
+  if (!extension) {
+    throw new Error("A line 1 extension is required for the new phone.");
+  }
+
+  const entries = sourceEntries.map((e) => ({ ...e, attributes: { ...(e.attributes || {}) } }));
+  const sourceExt = entryValue(entries, "User_ID_1_");
+  const sourceName = entryValue(entries, "Display_Name_1_");
+  const sourceShort = entryValue(entries, "Short_Name_1_");
+
+  setEntryValue(entries, "User_ID_1_", extension);
+  if (entryValue(entries, "Extension_1_") === "" || /^disabled$/i.test(entryValue(entries, "Extension_1_"))) {
+    setEntryValue(entries, "Extension_1_", "1");
+  }
+  if (String(displayName).trim()) {
+    setEntryValue(entries, "Display_Name_1_", String(displayName).trim());
+  }
+  if (String(password)) {
+    setEntryValue(entries, "Password_1_", String(password));
+  }
+  if (String(station).trim()) {
+    setEntryValue(entries, "Station_Display_Name", String(station).trim());
+  }
+
+  // Keep the short name meaningful: if it mirrored the old extension or name, follow the new one.
+  if (sourceShort && sourceExt && sourceShort === sourceExt) {
+    setEntryValue(entries, "Short_Name_1_", extension);
+  } else if (sourceShort && sourceName && sourceShort === sourceName && String(displayName).trim()) {
+    setEntryValue(entries, "Short_Name_1_", String(displayName).trim());
+  }
+
+  return entries;
+}
+
 // --- find in all configs ------------------------------------------------------
 const SEARCH_MODES = new Set(["contains", "exact", "regex"]);
 const MAX_SEARCH_MATCHES_PER_FILE = 20;
@@ -1815,6 +1872,74 @@ app.get("/api/files/:name", async (req, res) => {
   }
 });
 
+// Registered ahead of /api/files/:name, which would otherwise swallow "clone" as a file name.
+app.post("/api/files/clone", authGuard.requireWriter, async (req, res) => {
+  try {
+    ensureConnected();
+
+    const source = sanitizeFileName(String(req.body?.source || ""));
+    const fileName = sanitizeFileName(String(req.body?.fileName || ""));
+    if (!PHONE_FILE_PATTERN.test(fileName)) {
+      return res.status(400).json({ error: "The new file must be named spa<MAC>.xml so the phone can request it." });
+    }
+    if (fileName.toLowerCase() === source.toLowerCase()) {
+      return res.status(400).json({ error: "The new file needs a different name from the phone it is cloned from." });
+    }
+
+    const sourcePath = path.posix.join(connection.remoteDir, source);
+    const targetPath = path.posix.join(connection.remoteDir, fileName);
+    if (!(await sftp.exists(sourcePath))) {
+      return res.status(404).json({ error: `Source file not found: ${source}` });
+    }
+    if (await sftp.exists(targetPath)) {
+      return res.status(400).json({ error: `File already exists: ${fileName}` });
+    }
+
+    const content = await sftp.get(sourcePath);
+    const { rootKey, entries: sourceEntries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
+
+    let entries;
+    try {
+      entries = buildClonedEntries(sourceEntries, {
+        ext: req.body?.ext,
+        displayName: req.body?.displayName,
+        password: req.body?.password,
+        station: req.body?.station
+      });
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    const xml = entriesToXml(rootKey || "flat-profile", entries);
+    await sftp.put(Buffer.from(xml, "utf8"), targetPath);
+
+    const stationDisplayName = findStationDisplayNameInEntries(entries);
+    setFileMetadataCacheEntry(buildCacheKey(fileName), {
+      size: Buffer.byteLength(xml, "utf8"),
+      modified: Date.now(),
+      stationDisplayName,
+      extension: findLineExtension(entries) || ""
+    });
+
+    appendLogEntries(buildLogScope(connection), [{
+      ts: Date.now(),
+      action: "create",
+      file: fileName,
+      station: stationDisplayName,
+      tag: null,
+      before: null,
+      after: `Cloned from ${source} (${entries.length} field${entries.length === 1 ? "" : "s"}), line 1 = ${String(req.body.ext).trim()}`,
+      status: "changed",
+      error: null,
+      snapshotId: null
+    }], req.user ? req.user.username : "");
+
+    return res.json({ ok: true, message: `Created ${fileName} from ${source}`, fileName, source });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 app.post("/api/files/:name", authGuard.requireWriter, async (req, res) => {
   try {
     ensureConnected();
@@ -2202,6 +2327,7 @@ module.exports = {
   applyBulkEdit,
   buildSearchCriteria,
   matchEntries,
+  buildClonedEntries,
   entriesToXml,
   extractStationDisplayName,
   findStationDisplayNameInEntries,

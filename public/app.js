@@ -65,6 +65,17 @@ const resyncTopBtn = document.getElementById("resync-top-btn");
 const resyncQuickBtn = document.getElementById("resync-quick-btn");
 const saveQuickBtn = document.getElementById("save-quick-btn");
 const statusCommandInput = document.getElementById("status-command");
+const cloneBtn = document.getElementById("clone-btn");
+const clonePanel = document.getElementById("clone-panel");
+const cloneSourceLabel = document.getElementById("clone-source-label");
+const cloneCloseBtn = document.getElementById("clone-close-btn");
+const cloneMacInput = document.getElementById("clone-mac");
+const cloneExtInput = document.getElementById("clone-ext");
+const cloneDisplayInput = document.getElementById("clone-display");
+const clonePasswordInput = document.getElementById("clone-password");
+const cloneStationInput = document.getElementById("clone-station");
+const cloneFilePreview = document.getElementById("clone-file-preview");
+const cloneCreateBtn = document.getElementById("clone-create-btn");
 const findTagInput = document.getElementById("find-tag");
 const findValueInput = document.getElementById("find-value");
 const findModeSelect = document.getElementById("find-mode");
@@ -654,6 +665,8 @@ async function loadFile(name) {
   updateQuickScopeHints();
 
   historyBtn.hidden = false;
+  cloneBtn.hidden = false;
+  clonePanel.hidden = true;
   if (!historyPanel.hidden) {
     await refreshHistory();
   }
@@ -1584,6 +1597,91 @@ resyncTestBtn.addEventListener("click", () => {
   testResync().catch((error) => setStatus(error.message, true));
 });
 
+// --- clone a phone ----------------------------------------------------------------------
+
+/** A MAC in any common notation becomes spa<mac>.xml; anything ending in .xml is taken as is. */
+function cloneFileNameFromInput(text) {
+  const raw = String(text || "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (/\.xml$/i.test(raw)) {
+    return raw;
+  }
+  const hex = raw.replace(/[^0-9a-fA-F]/g, "").toLowerCase();
+  return hex.length === 12 ? `spa${hex}.xml` : "";
+}
+
+function updateClonePreview() {
+  const name = cloneFileNameFromInput(cloneMacInput.value);
+  cloneFilePreview.textContent = name || (cloneMacInput.value.trim() ? "(enter a 12-digit MAC or a file name ending in .xml)" : "-");
+}
+
+function openClonePanel() {
+  if (!currentFile) {
+    setStatus("Open the phone to copy from first.", true);
+    return;
+  }
+  cloneSourceLabel.textContent = currentFile;
+  cloneMacInput.value = "";
+  cloneExtInput.value = "";
+  cloneDisplayInput.value = "";
+  clonePasswordInput.value = "";
+  cloneStationInput.value = "";
+  updateClonePreview();
+  historyPanel.hidden = true;
+  clonePanel.hidden = false;
+  cloneMacInput.focus();
+}
+
+async function createClone() {
+  const fileName = cloneFileNameFromInput(cloneMacInput.value);
+  const ext = cloneExtInput.value.trim();
+  if (!fileName) {
+    setStatus("Enter the new phone's MAC address (12 hex digits) or a file name ending in .xml.", true);
+    return;
+  }
+  if (!ext) {
+    setStatus("Enter the new phone's line 1 extension.", true);
+    return;
+  }
+
+  const result = await api("/api/files/clone", {
+    method: "POST",
+    body: JSON.stringify({
+      source: currentFile,
+      fileName,
+      ext,
+      displayName: cloneDisplayInput.value.trim(),
+      password: clonePasswordInput.value,
+      station: cloneStationInput.value.trim()
+    })
+  });
+
+  clonePanel.hidden = true;
+  setStatus(result.message || `Created ${fileName}`);
+  await refreshFiles();
+  await refreshLogScopes();
+  await loadFile(result.fileName);
+}
+
+cloneBtn.addEventListener("click", openClonePanel);
+cloneCloseBtn.addEventListener("click", () => {
+  clonePanel.hidden = true;
+});
+cloneMacInput.addEventListener("input", updateClonePreview);
+cloneCreateBtn.addEventListener("click", () => {
+  createClone().catch((error) => setStatus(error.message, true));
+});
+for (const input of [cloneMacInput, cloneExtInput, cloneDisplayInput, clonePasswordInput, cloneStationInput]) {
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      createClone().catch((error) => setStatus(error.message, true));
+    }
+  });
+}
+
 // --- find in all configs ------------------------------------------------------------
 
 let lastFind = null;
@@ -1890,6 +1988,8 @@ async function handleDisconnectClick() {
     regCountEl.hidden = true;
     historyBtn.hidden = true;
     historyPanel.hidden = true;
+    cloneBtn.hidden = true;
+    clonePanel.hidden = true;
     connectedScopeKey = null;
     bulkRollbackBtn.hidden = true;
     renderLogEntries();

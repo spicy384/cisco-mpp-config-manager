@@ -51,6 +51,8 @@ const bulkApplyBtn = document.getElementById("bulk-apply-btn");
 const bulkSelectionCountEl = document.getElementById("bulk-selection-count");
 const bulkResultsEl = document.getElementById("bulk-results");
 const bulkRollbackBtn = document.getElementById("bulk-rollback-btn");
+const bulkRollbackResyncLabel = document.getElementById("bulk-rollback-resync-label");
+const bulkRollbackResyncInput = document.getElementById("bulk-rollback-resync");
 const historyBtn = document.getElementById("history-btn");
 const historyPanel = document.getElementById("history-panel");
 const historyMetaEl = document.getElementById("history-meta");
@@ -928,6 +930,7 @@ const BULK_STATUS_LABEL = {
 function renderBulkResults(data) {
   bulkResultsEl.replaceChildren();
   bulkRollbackBtn.hidden = true;
+  bulkRollbackResyncLabel.hidden = true;
 
   const summary = document.createElement("div");
   summary.className = "bulk-summary";
@@ -1461,6 +1464,9 @@ function offerBatchRollback(job) {
     && (job.results || []).some((item) => item.status === "changed" && item.snapshotId);
   lastAppliedJob = possible ? job : null;
   bulkRollbackBtn.hidden = !possible;
+  bulkRollbackResyncLabel.hidden = !possible;
+  // Unticked every time: resyncing is always a deliberate choice.
+  bulkRollbackResyncInput.checked = false;
 }
 
 async function rollbackBatch() {
@@ -1474,13 +1480,18 @@ async function rollbackBatch() {
     `Roll back this batch?\n\n${count} file${count === 1 ? "" : "s"} will be put back to the copy taken just before `
       + "the bulk edit was applied. Anything changed in those files since then is overwritten.\n\n"
       + "The current files are kept first, so each one can still be restored from History."
+      + (bulkRollbackResyncInput.checked ? "\n\nEach rolled-back phone will then be told to fetch its configuration." : "")
   );
   if (!ok) {
     setStatus("Roll back cancelled.");
     return;
   }
 
-  const start = await api(`/api/bulk-edit/${encodeURIComponent(job.jobId)}/rollback`, { method: "POST" });
+  const resync = bulkRollbackResyncInput.checked;
+  const start = await api(`/api/bulk-edit/${encodeURIComponent(job.jobId)}/rollback`, {
+    method: "POST",
+    body: JSON.stringify({ resync })
+  });
   const result = await pollJobWithProgress(start.jobId, "Rolling back");
 
   renderBulkResults(result);
@@ -1488,7 +1499,9 @@ async function rollbackBatch() {
 
   const restored = result.summary?.changed || 0;
   const errors = result.summary?.error || 0;
-  setStatus(`Rolled back ${restored} file${restored === 1 ? "" : "s"}${errors ? `, ${errors} failed` : ""}.`, errors > 0);
+  const resyncNote = result.resync ? `. ${summarizeResync(result.results)}` : "";
+  const resyncFailed = result.resync && (result.results || []).some((item) => item.resync?.status === "failed");
+  setStatus(`Rolled back ${restored} file${restored === 1 ? "" : "s"}${errors ? `, ${errors} failed` : ""}${resyncNote}`, errors > 0 || resyncFailed);
 
   await refreshFiles();
   await refreshLogScopes();

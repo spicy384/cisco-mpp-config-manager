@@ -844,6 +844,7 @@ async function restoreSnapshot(fileName, snapshotId, user = "") {
   return {
     fileName,
     station,
+    ext: findLineExtension(restoredEntries),
     restored: { id: snapshot.id, ts: snapshot.ts },
     changes: changes.length,
     // The copy taken just now, i.e. what "undo this restore" would bring back.
@@ -1160,7 +1161,8 @@ async function runRollbackJob(job) {
         previousValues: [],
         newValue: `restored (${result.changes} field${result.changes === 1 ? "" : "s"})`,
         changes: [],
-        snapshotId: result.undoSnapshotId
+        snapshotId: result.undoSnapshotId,
+        ext: result.ext
       });
     } catch (error) {
       job.results.push({
@@ -1175,6 +1177,15 @@ async function runRollbackJob(job) {
   }
 
   job.currentFile = null;
+
+  // Optionally tell the rolled-back phones to fetch their (restored) configs.
+  if (job.request.resync) {
+    await resyncChangedPhones(job);
+    const rows = job.results
+      .filter((item) => item.resync)
+      .map((item) => resyncLogEntry(item.name, item.station, item.resync));
+    appendLogEntries(job.request.scope, rows, job.request.user);
+  }
 }
 
 async function runBulkJob(job) {
@@ -1527,6 +1538,9 @@ app.post("/api/bulk-edit/:jobId/rollback", authGuard.requireWriter, (req, res) =
         rollbackOf: source.id,
         targets,
         scope,
+        // Off unless asked, like the apply's own tick box.
+        resync: req.body?.resync === true,
+        resyncCommand: connection.resyncCommand,
         user: req.user ? req.user.username : ""
       }
     };

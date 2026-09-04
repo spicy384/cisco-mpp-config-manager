@@ -502,6 +502,10 @@
         <button id="bulk-preview-btn" type="button">Preview Changes</button>
         <button id="bulk-apply-btn" type="button" class="danger writer-only" disabled>Apply to PBX</button>
         <button id="bulk-rollback-btn" type="button" class="secondary writer-only" hidden>Roll Back This Batch</button>
+        <label id="bulk-rollback-resync-label" class="check-inline writer-only" title="After rolling back, tell each phone to fetch its restored configuration" hidden>
+          <input type="checkbox" id="bulk-rollback-resync" />
+          Resync rolled-back phones
+        </label>
         <label class="check-inline writer-only" title="After writing, tell each changed phone to fetch its configuration">
           <input type="checkbox" id="bulk-resync" />
           Resync changed phones after applying

@@ -243,7 +243,8 @@ it stores the file exactly as it was. That makes every change undoable:
   kept, by whom, phone name, size) with a **Restore** button on each.
 - **Restore** in the change log puts the file back as it was *before that row's change*.
 - **Roll Back This Batch** appears after a bulk apply and restores every file the batch
-  changed, with the same progress bar as the apply.
+  changed, with the same progress bar as the apply. Its **Resync rolled-back phones** tick
+  box, unticked every time, tells each restored phone to fetch its config afterwards.
 
 Restore always shows what will change - the field-level differences between the version
 and the file as it is on the PBX right now - before writing anything, and it stores the
@@ -275,7 +276,7 @@ Resync is always a separate, deliberate step:
   resyncs by itself, so you can make several changes and push them once.
 - **Resync changed phones after applying** in Bulk Edit resyncs every phone the batch
   actually changed, as a second stage with its own progress. Untick it and nothing is sent.
-  A rollback does not resync; resync the affected phones afterwards if you need to.
+  **Roll Back This Batch** has the same tick box, also unticked by default.
 - A phone with no line 1 extension is skipped and says so. Every resync, sent, skipped or
   failed, is a row in the change log.
 

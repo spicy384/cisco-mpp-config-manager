@@ -169,6 +169,17 @@
         <label>Registration status command (optional - lists registered phones; blank for PJSIP)
           <input id="status-command" placeholder='asterisk -rx "pjsip show contacts"' />
         </label>
+        <div class="three-col">
+          <label>Default phone model (for phones without one set)
+            <select id="profile-model"><option value="">(app default)</option></select>
+          </label>
+          <label id="profile-kems-label" hidden>Expansion modules
+            <select id="profile-kems"></select>
+          </label>
+          <label id="profile-custom-label" hidden>Line keys
+            <input id="profile-custom-keys" type="number" min="1" max="100" value="10" />
+          </label>
+        </div>
         <label>Password (required to connect) <input name="password" type="password" required /></label>
 
         <div class="actions">
@@ -317,6 +328,18 @@
             Pick a key to set what it does - a registered line, a speed dial, a BLF, or
             nothing at all. The app writes the tags and values for you.
           </p>
+          <div class="quick-model">
+            <label>Phone model
+              <select id="quick-model"></select>
+            </label>
+            <label id="quick-kems-label" hidden>Expansion modules
+              <select id="quick-kems"></select>
+            </label>
+            <label id="quick-custom-label" hidden>Line keys
+              <input id="quick-custom-keys" type="number" min="1" max="100" value="10" />
+            </label>
+            <span id="quick-model-note" class="quick-footer-hint"></span>
+          </div>
           <div id="quick-buttons" class="quick-buttons"></div>
 
           <div id="quick-button-form" class="quick-form" hidden>

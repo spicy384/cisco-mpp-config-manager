@@ -15,6 +15,8 @@ const SERVERS_FILE = path.join(DATA_DIR, "servers.json");
 const FILE_CACHE_FILE = path.join(DATA_DIR, "file-metadata-cache.json");
 const TEMPLATES_FILE = path.join(DATA_DIR, "templates.json");
 const CHANGE_LOG_FILE = path.join(DATA_DIR, "change-log.json");
+// Which phone model each config file belongs to, so the Quick editor shows the right keys.
+const PHONE_MODELS_FILE = path.join(DATA_DIR, "phone-models.json");
 /**
  * Where the built-in "Default Template" is read from, tried in order:
  *   1. DEFAULT_TEMPLATE_PATH env var
@@ -46,7 +48,7 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const { createAuth } = require("./auth-routes");
 const { resolveTlsOptions } = require("./tls-setup");
-const { quickSchema } = require("./public/quick-config");
+const { quickSchema, normalizeModelChoice } = require("./public/quick-config");
 const authGuard = createAuth({ dataDir: DATA_DIR });
 const { createHostKeyStore } = require("./host-keys");
 // SSH host keys are remembered on first connection and checked on every later one.
@@ -342,6 +344,12 @@ function sanitizeServerProfile(input) {
   const resyncCommand = validateResyncCommand(input?.resyncCommand);
   // How to list registered phones. Blank means "pjsip show contacts".
   const statusCommand = validateStatusCommand(input?.statusCommand);
+  // Which phone model new and unassigned configs are assumed to be. Null means the app default.
+  const defaultModel = normalizeModelChoice({
+    model: input?.defaultModel?.model ?? input?.defaultModel,
+    kems: input?.defaultModel?.kems ?? input?.defaultKems,
+    customKeys: input?.defaultModel?.customKeys ?? input?.defaultCustomKeys
+  });
 
   if (!name || !host || !username || !remoteDir) {
     throw new Error("name, host, username, and remoteDir are required.");
@@ -360,7 +368,8 @@ function sanitizeServerProfile(input) {
     remoteDir,
     sipServer,
     resyncCommand,
-    statusCommand
+    statusCommand,
+    defaultModel
   };
 }
 
@@ -888,6 +897,40 @@ async function resyncChangedPhones(job) {
   }
 
   job.currentFile = null;
+}
+
+// --- phone models ------------------------------------------------------------------
+function loadPhoneModels() {
+  ensureDataStore();
+  try {
+    const parsed = JSON.parse(fs.readFileSync(PHONE_MODELS_FILE, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePhoneModels(map) {
+  ensureDataStore();
+  fs.writeFileSync(PHONE_MODELS_FILE, JSON.stringify(map, null, 2), "utf8");
+}
+
+function getPhoneModel(fileName) {
+  return normalizeModelChoice(loadPhoneModels()[buildCacheKey(fileName)]);
+}
+
+/** Null clears the record so the profile default applies again. */
+function setPhoneModel(fileName, choice) {
+  const map = loadPhoneModels();
+  const key = buildCacheKey(fileName);
+  const clean = normalizeModelChoice(choice);
+  if (clean) {
+    map[key] = clean;
+  } else {
+    delete map[key];
+  }
+  savePhoneModels(map);
+  return clean;
 }
 
 // --- clone a phone --------------------------------------------------------------
@@ -1736,6 +1779,7 @@ app.post("/api/connect", async (req, res) => {
       sipServer: target.sipServer || "",
       resyncCommand: resolveResyncCommand(target.resyncCommand),
       statusCommand: resolveStatusCommand(target.statusCommand),
+      defaultModel: normalizeModelChoice(target.defaultModel),
       hostKey: { fingerprint: hostKey.outcome.fingerprint, status: hostKey.outcome.status }
     };
 
@@ -1866,7 +1910,32 @@ app.get("/api/files/:name", async (req, res) => {
 
     const { rootKey, entries } = xmlToEntries(xmlText);
 
-    res.json({ fileName, rootKey, entries, xmlText, version: contentVersion(xmlText) });
+    res.json({ fileName, rootKey, entries, xmlText, version: contentVersion(xmlText), model: getPhoneModel(fileName) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/files/:name/model", (req, res) => {
+  try {
+    ensureConnected();
+    const fileName = sanitizeFileName(req.params.name);
+    res.json({ fileName, model: getPhoneModel(fileName), profileDefault: connection.defaultModel || null });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put("/api/files/:name/model", authGuard.requireWriter, (req, res) => {
+  try {
+    ensureConnected();
+    const fileName = sanitizeFileName(req.params.name);
+    const wanted = req.body?.model ? req.body : null;
+    if (wanted && !normalizeModelChoice(wanted)) {
+      return res.status(400).json({ error: "Unknown phone model." });
+    }
+    const model = setPhoneModel(fileName, wanted);
+    res.json({ ok: true, fileName, model });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1933,6 +2002,12 @@ app.post("/api/files/clone", authGuard.requireWriter, async (req, res) => {
       error: null,
       snapshotId: null
     }], req.user ? req.user.username : "");
+
+    // A clone is the same kind of phone as its source unless told otherwise.
+    const sourceModel = getPhoneModel(source);
+    if (sourceModel) {
+      setPhoneModel(fileName, sourceModel);
+    }
 
     return res.json({ ok: true, message: `Created ${fileName} from ${source}`, fileName, source });
   } catch (error) {

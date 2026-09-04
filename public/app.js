@@ -65,6 +65,17 @@ const resyncTopBtn = document.getElementById("resync-top-btn");
 const resyncQuickBtn = document.getElementById("resync-quick-btn");
 const saveQuickBtn = document.getElementById("save-quick-btn");
 const statusCommandInput = document.getElementById("status-command");
+const quickModelSelect = document.getElementById("quick-model");
+const quickKemsLabel = document.getElementById("quick-kems-label");
+const quickKemsSelect = document.getElementById("quick-kems");
+const quickCustomLabel = document.getElementById("quick-custom-label");
+const quickCustomKeysInput = document.getElementById("quick-custom-keys");
+const quickModelNote = document.getElementById("quick-model-note");
+const profileModelSelect = document.getElementById("profile-model");
+const profileKemsLabel = document.getElementById("profile-kems-label");
+const profileKemsSelect = document.getElementById("profile-kems");
+const profileCustomLabel = document.getElementById("profile-custom-label");
+const profileCustomKeysInput = document.getElementById("profile-custom-keys");
 const cloneBtn = document.getElementById("clone-btn");
 const clonePanel = document.getElementById("clone-panel");
 const cloneSourceLabel = document.getElementById("clone-source-label");
@@ -557,6 +568,7 @@ function fillFormFromServer(serverId) {
   sipServerInput.value = server.sipServer || "";
   resyncCommandInput.value = server.resyncCommand || "";
   statusCommandInput.value = server.statusCommand || "";
+  writeModelControls(profileControls, server.defaultModel || null);
 }
 
 async function refreshFiles() {
@@ -648,6 +660,7 @@ async function loadFile(name) {
 
   currentFile = data.fileName;
   currentFileVersion = data.version || null;
+  setPhoneModelChoice(data.model || null, data.model ? "phone" : null);
   fileNameInput.value = data.fileName;
   rootKeyInput.value = data.rootKey || "flat-profile";
 
@@ -821,7 +834,8 @@ async function saveServerProfile() {
     remoteDir,
     sipServer: sipServerInput.value.trim(),
     resyncCommand: resyncCommandInput.value.trim(),
-    statusCommand: statusCommandInput.value.trim()
+    statusCommand: statusCommandInput.value.trim(),
+    defaultModel: readModelControls(profileControls)
   };
 
   const data = await api("/api/servers", {
@@ -1597,6 +1611,113 @@ resyncTestBtn.addEventListener("click", () => {
   testResync().catch((error) => setStatus(error.message, true));
 });
 
+// --- phone model ---------------------------------------------------------------------------
+
+// What the open phone is: its own record, else the profile default, else the app default.
+let phoneModelChoice = null;   // the phone's own record, or null
+let phoneModelSource = null;   // "phone" when the record above applies
+
+const quickControls = { model: quickModelSelect, kemsLabel: quickKemsLabel, kems: quickKemsSelect, customLabel: quickCustomLabel, custom: quickCustomKeysInput };
+const profileControls = { model: profileModelSelect, kemsLabel: profileKemsLabel, kems: profileKemsSelect, customLabel: profileCustomLabel, custom: profileCustomKeysInput };
+
+function effectiveModelChoice() {
+  return phoneModelChoice || lastConnectionInfo?.defaultModel || { model: quickSchemaData?.defaultModel || "8841", kems: 0, customKeys: 0 };
+}
+
+function populateModelSelect(select, { allowBlank }) {
+  select.replaceChildren();
+  if (allowBlank) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "(app default)";
+    select.appendChild(opt);
+  }
+  for (const m of quickSchemaData?.models || []) {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = m.keys === null ? m.label : `${m.label} - ${m.keys} key${m.keys === 1 ? "" : "s"}${m.confirmed ? "" : " (unverified)"}`;
+    select.appendChild(opt);
+  }
+}
+
+/** Shows or hides the expansion-module and custom-count controls for the chosen model. */
+function syncModelControls(controls) {
+  const model = QuickConfig.findModel(controls.model.value);
+  const kem = model?.kem || null;
+  controls.kemsLabel.hidden = !kem;
+  if (kem) {
+    const current = controls.kems.value;
+    controls.kems.replaceChildren();
+    for (let n = 0; n <= kem.max; n += 1) {
+      const opt = document.createElement("option");
+      opt.value = String(n);
+      opt.textContent = n === 0 ? "None" : `${n} (${n * kem.keys} more keys)`;
+      controls.kems.appendChild(opt);
+    }
+    controls.kems.value = current && Number(current) <= kem.max ? current : "0";
+  }
+  controls.customLabel.hidden = model?.id !== "custom";
+}
+
+function readModelControls(controls) {
+  if (!controls.model.value) return null;
+  return QuickConfig.normalizeModelChoice({
+    model: controls.model.value,
+    kems: controls.kems.value,
+    customKeys: controls.custom.value
+  });
+}
+
+function writeModelControls(controls, choice) {
+  const clean = QuickConfig.normalizeModelChoice(choice);
+  controls.model.value = clean ? clean.model : "";
+  syncModelControls(controls);
+  if (clean) {
+    controls.kems.value = String(clean.kems);
+    if (clean.model === "custom") controls.custom.value = String(clean.customKeys);
+  }
+}
+
+function setPhoneModelChoice(choice, source) {
+  phoneModelChoice = QuickConfig.normalizeModelChoice(choice);
+  phoneModelSource = phoneModelChoice ? source : null;
+  writeModelControls(quickControls, effectiveModelChoice());
+  updateModelNote();
+}
+
+function updateModelNote() {
+  const choice = effectiveModelChoice();
+  const from = phoneModelSource === "phone"
+    ? "set for this phone"
+    : (lastConnectionInfo?.defaultModel ? "profile default" : "app default");
+  quickModelNote.textContent = `${QuickConfig.describeModelChoice(choice)} (${from})`;
+}
+
+/** The Quick tab's model controls: change the grid now, and remember it for the open phone. */
+async function onQuickModelChanged() {
+  syncModelControls(quickControls);
+  const choice = readModelControls(quickControls);
+  if (!choice) return;
+
+  phoneModelChoice = choice;
+  renderQuickButtons();
+
+  if (currentFile && canWrite()) {
+    try {
+      await api(`/api/files/${encodeURIComponent(currentFile)}/model`, { method: "PUT", body: JSON.stringify(choice) });
+      phoneModelSource = "phone";
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  }
+  updateModelNote();
+}
+
+for (const el of [quickModelSelect, quickKemsSelect, quickCustomKeysInput]) {
+  el.addEventListener("change", () => { onQuickModelChanged().catch((error) => setStatus(error.message, true)); });
+}
+profileModelSelect.addEventListener("change", () => syncModelControls(profileControls));
+
 // --- clone a phone ----------------------------------------------------------------------
 
 /** A MAC in any common notation becomes spa<mac>.xml; anything ending in .xml is taken as is. */
@@ -1917,6 +2038,7 @@ connectForm.addEventListener("submit", async (e) => {
 
     lastConnectionInfo = data.connection || null;
     setConnectionCollapsed(true, data.connection || null);
+    setPhoneModelChoice(null, null);
 
     const hostKey = data.connection?.hostKey;
     setStatus(hostKey?.status === "new"
@@ -2231,15 +2353,38 @@ function readLineKeyFromEditor(index) {
   return QuickConfig.readLineKey(readEntriesRaw(), index);
 }
 
+/** The highest key that has something configured, so nothing set is ever hidden. */
+function highestConfiguredKey() {
+  let highest = 0;
+  for (const entry of readEntriesRaw()) {
+    const m = /^(Extended_Function|Extension|User_ID)_(\d+)_$/.exec(entry.key || "");
+    if (!m) continue;
+    const n = Number(m[2]);
+    const value = String(entry.value == null ? "" : entry.value).trim();
+    const configured = m[1] === "Extended_Function"
+      ? value !== ""
+      : (m[1] === "User_ID" ? value !== "" : value !== "" && !/^disabled$/i.test(value));
+    if (configured && n > highest) highest = n;
+  }
+  return Math.min(highest, quickSchemaData ? quickSchemaData.lineKeyCount : highest);
+}
+
 function renderQuickButtons() {
   if (!quickSchemaData) return;
   quickButtonsEl.replaceChildren();
 
-  for (let i = 1; i <= quickSchemaData.lineKeyCount; i += 1) {
+  const modelKeys = QuickConfig.lineKeyCount(effectiveModelChoice());
+  const shown = Math.max(modelKeys, highestConfiguredKey());
+
+  for (let i = 1; i <= shown; i += 1) {
     const state = readLineKeyFromEditor(i);
+    const beyond = i > modelKeys;
+    if (beyond && (!state || state.type === "unused")) continue;
+
     const card = document.createElement("button");
     card.type = "button";
-    card.className = "quick-button" + (state && state.type !== "unused" ? " is-set" : "");
+    card.className = "quick-button" + (state && state.type !== "unused" ? " is-set" : "") + (beyond ? " is-beyond" : "");
+    if (beyond) card.title = `Key ${i} is beyond this model's ${modelKeys} line keys. It is still in the config.`;
     if (quickEditingIndex === i) card.classList.add("is-editing");
 
     const num = document.createElement("span");
@@ -2498,6 +2643,11 @@ tabAdvanced.addEventListener("click", () => showTab("advanced"));
 
 async function loadQuickSchema() {
   quickSchemaData = await api("/api/quick/schema");
+  populateModelSelect(quickModelSelect, { allowBlank: false });
+  populateModelSelect(profileModelSelect, { allowBlank: true });
+  writeModelControls(quickControls, effectiveModelChoice());
+  syncModelControls(profileControls);
+  updateModelNote();
 
   quickTypeSelect.replaceChildren();
   for (const type of quickSchemaData.lineKeyTypes) {

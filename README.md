@@ -81,6 +81,32 @@ Each key shows what it is currently set to, read back out of the config, and the
 pre-filled from it. Before you apply, the editor shows exactly which tags and values it will
 write.
 
+### Phone model
+The key grid shows as many line keys as the phone has. Pick the model at the top of
+**Lines and Buttons**; it is remembered for that phone (a clone inherits it), and a PBX
+server profile can set a default for phones without one. Keys beyond the model's count that
+already have something configured are still shown, marked *beyond model*, so nothing in the
+config is ever hidden.
+
+| Model | Line keys | Expansion modules |
+|---|---|---|
+| 6821 | 2 | - |
+| 6841, 6851, 6861 | 4 | 6851: one 14-key module |
+| 6871 | 6 | one 14-key module |
+| 7811 | 1 | - |
+| 7821 | 2 | - |
+| 7841 | 4 | - |
+| 7861 | 16 | - |
+| 8811, 8841, 8845 | 10 | - |
+| 8851 | 10 | up to two 28-key modules |
+| 8861, 8865 | 10 | up to three 28-key modules |
+| Custom | whatever you enter | - |
+
+These are the keys the MPP firmware exposes, which is what the config addresses, not the
+physical button count. The 8841 figure is confirmed on hardware; the rest are from Cisco's
+documentation and marked *unverified* in the list. If one is wrong for your phones, use
+**Custom** and tell us the right number.
+
 ### Settings
 | Setting | Tags written |
 |---|---|

@@ -512,6 +512,33 @@ body.theme-dark .icon-moon { display: inline; }
   color: var(--text-muted);
 }
 
+.quick-model {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin: 0 0 12px;
+}
+
+.quick-model label {
+  min-width: 160px;
+}
+
+.quick-model .quick-footer-hint {
+  padding-bottom: 8px;
+}
+
+.quick-button.is-beyond {
+  opacity: 0.7;
+  border-style: dashed;
+}
+
+.quick-button.is-beyond .quick-button-num::after {
+  content: " (beyond model)";
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
 .quick-footer {
   margin-top: 18px;
   padding-top: 14px;

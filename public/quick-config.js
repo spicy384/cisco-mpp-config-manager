@@ -20,7 +20,78 @@
   root.QuickConfig = api;
 }(typeof globalThis !== "undefined" ? globalThis : this, function () {
   // Line keys present on the phone models in use.
-  const LINE_KEY_COUNT = 16;
+  // The most line keys any supported phone can address, expansion modules included
+  // (an 8861 with three 28-key modules). The grid shows only what the model has.
+  const LINE_KEY_COUNT = 100;
+
+  /**
+   * Line keys as the MPP firmware exposes them, which is what the config addresses.
+   * kem: the key expansion module the model takes, and how many can be chained.
+   * Counts confirmed on hardware are marked; correct the rest with the Custom model.
+   */
+  const PHONE_MODELS = [
+    { id: "6821", label: "Cisco 6821", keys: 2 },
+    { id: "6841", label: "Cisco 6841", keys: 4 },
+    { id: "6851", label: "Cisco 6851", keys: 4, kem: { keys: 14, max: 1 } },
+    { id: "6861", label: "Cisco 6861", keys: 4 },
+    { id: "6871", label: "Cisco 6871", keys: 6, kem: { keys: 14, max: 1 } },
+    { id: "7811", label: "Cisco 7811", keys: 1 },
+    { id: "7821", label: "Cisco 7821", keys: 2 },
+    { id: "7841", label: "Cisco 7841", keys: 4 },
+    { id: "7861", label: "Cisco 7861", keys: 16 },
+    { id: "8811", label: "Cisco 8811", keys: 10 },
+    { id: "8841", label: "Cisco 8841", keys: 10, confirmed: true },
+    { id: "8845", label: "Cisco 8845", keys: 10 },
+    { id: "8851", label: "Cisco 8851", keys: 10, kem: { keys: 28, max: 2 } },
+    { id: "8861", label: "Cisco 8861", keys: 10, kem: { keys: 28, max: 3 } },
+    { id: "8865", label: "Cisco 8865", keys: 10, kem: { keys: 28, max: 3 } },
+    { id: "custom", label: "Custom (enter the number of keys)", keys: null }
+  ];
+  const DEFAULT_MODEL = "8841";
+  const MODEL_BY_ID = new Map(PHONE_MODELS.map((m) => [m.id, m]));
+
+  function findModel(id) {
+    return MODEL_BY_ID.get(String(id || "")) || null;
+  }
+
+  /**
+   * Cleans a { model, kems, customKeys } choice: unknown models become none,
+   * expansion modules are clamped to what the model takes, custom counts to 1..LINE_KEY_COUNT.
+   */
+  function normalizeModelChoice(choice) {
+    const model = findModel(choice && choice.model);
+    if (!model) {
+      return null;
+    }
+    const kemMax = model.kem ? model.kem.max : 0;
+    const kems = Math.max(0, Math.min(kemMax, Math.floor(Number(choice.kems) || 0)));
+    const customRaw = Math.floor(Number(choice.customKeys) || 0);
+    const customKeys = model.id === "custom"
+      ? Math.max(1, Math.min(LINE_KEY_COUNT, customRaw || 1))
+      : 0;
+    return { model: model.id, kems, customKeys };
+  }
+
+  /** How many line keys a phone has, given its model and expansion modules. */
+  function lineKeyCount(choice) {
+    const clean = normalizeModelChoice(choice) || { model: DEFAULT_MODEL, kems: 0, customKeys: 0 };
+    const model = findModel(clean.model);
+    const base = model.id === "custom" ? clean.customKeys : model.keys;
+    const extra = model.kem ? clean.kems * model.kem.keys : 0;
+    return Math.max(1, Math.min(LINE_KEY_COUNT, base + extra));
+  }
+
+  function describeModelChoice(choice) {
+    const clean = normalizeModelChoice(choice);
+    if (!clean) {
+      return "";
+    }
+    const model = findModel(clean.model);
+    const label = model.id === "custom" ? `Custom` : model.label;
+    const kem = clean.kems ? ` + ${clean.kems} expansion module${clean.kems === 1 ? "" : "s"}` : "";
+    const count = lineKeyCount(clean);
+    return `${label}${kem}: ${count} line key${count === 1 ? "" : "s"}`;
+  }
 
   const str = (v) => String(v ?? "").trim();
 
@@ -349,6 +420,8 @@
   function quickSchema() {
     return {
       lineKeyCount: LINE_KEY_COUNT,
+      models: PHONE_MODELS.map((m) => ({ id: m.id, label: m.label, keys: m.keys, kem: m.kem || null, confirmed: Boolean(m.confirmed) })),
+      defaultModel: DEFAULT_MODEL,
       lineKeyTypes: LINE_KEY_TYPES.map((t) => ({
         id: t.id,
         label: t.label,
@@ -389,6 +462,12 @@
 
   return {
     LINE_KEY_COUNT,
+    PHONE_MODELS,
+    DEFAULT_MODEL,
+    findModel,
+    normalizeModelChoice,
+    lineKeyCount,
+    describeModelChoice,
     LINE_KEY_TYPES,
     QUICK_SETTINGS,
     buildLineKey,

@@ -1156,7 +1156,7 @@ function renderLogEntries() {
     // Entries written since snapshots existed can put the file back as it was.
     const restoreTd = document.createElement("td");
     restoreTd.className = "restore-cell";
-    if (entry.snapshotId && entry.file) {
+    if (entry.snapshotId && entry.file && canWrite()) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "secondary small";
@@ -1251,14 +1251,16 @@ function renderHistory(data) {
 
     const actionTd = document.createElement("td");
     actionTd.className = "restore-cell";
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "secondary small";
-    btn.textContent = "Restore";
-    btn.addEventListener("click", () => {
-      restoreVersion(data.fileName, version.id).catch((error) => setStatus(error.message, true));
-    });
-    actionTd.appendChild(btn);
+    if (canWrite()) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "secondary small";
+      btn.textContent = "Restore";
+      btn.addEventListener("click", () => {
+        restoreVersion(data.fileName, version.id).catch((error) => setStatus(error.message, true));
+      });
+      actionTd.appendChild(btn);
+    }
     tr.appendChild(actionTd);
 
     tbody.appendChild(tr);
@@ -1989,6 +1991,7 @@ function renderQuickSettings() {
     const apply = document.createElement("button");
     apply.type = "button";
     apply.textContent = "Apply";
+    apply.className = "writer-only";
     apply.addEventListener("click", () => applyQuickSetting(setting.id, input.value));
 
     row.append(label, apply);
@@ -2229,10 +2232,18 @@ function setAuthMessage(text, isError = true) {
   authMessage.classList.toggle("is-error", isError);
 }
 
+const ROLE_LABEL = { admin: "Administrator", user: "User", viewer: "Viewer (read-only)" };
+
+/** Whether the signed-in account may change anything. Viewers only look. */
+function canWrite() {
+  return Boolean(currentUser) && currentUser.role !== "viewer";
+}
+
 /** Applies the signed-in identity to the chrome and reveals admin-only controls. */
 function applyIdentity(user, token) {
   currentUser = user;
   csrfToken = token;
+  document.body.classList.toggle("role-viewer", Boolean(user) && user.role === "viewer");
 
   const signedIn = Boolean(user);
   currentUserEl.hidden = !signedIn;
@@ -2241,7 +2252,7 @@ function applyIdentity(user, token) {
   usersBtn.hidden = !signedIn || user.role !== "admin";
 
   if (signedIn) {
-    currentUserEl.textContent = user.role === "admin" ? `${user.username} (admin)` : user.username;
+    currentUserEl.textContent = user.role === "user" ? user.username : `${user.username} (${user.role})`;
   }
 
   if (!signedIn) {
@@ -2494,7 +2505,7 @@ async function refreshUsers() {
     const tr = document.createElement("tr");
     for (const text of [
       user.username,
-      user.role === "admin" ? "Administrator" : "User",
+      ROLE_LABEL[user.role] || user.role,
       user.mfaEnrolled ? "Enabled" : "Not set up",
       user.lastLoginAt ? formatTimestamp(user.lastLoginAt) : "Never"
     ]) {
@@ -2525,6 +2536,28 @@ async function refreshUsers() {
     wrap.appendChild(resetBtn2);
 
     if (user.id !== currentUser?.id) {
+      const roleSelect = document.createElement("select");
+      roleSelect.className = "small";
+      roleSelect.title = "Change role";
+      for (const [value, label] of Object.entries(ROLE_LABEL)) {
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = label;
+        opt.selected = value === user.role;
+        roleSelect.appendChild(opt);
+      }
+      roleSelect.addEventListener("change", async () => {
+        try {
+          await api(`/api/users/${encodeURIComponent(user.id)}/role`, { method: "POST", body: JSON.stringify({ role: roleSelect.value }) });
+          await refreshUsers();
+          setStatus(`${user.username} is now ${ROLE_LABEL[roleSelect.value].toLowerCase()}.`);
+        } catch (error) {
+          setStatus(error.message, true);
+          roleSelect.value = user.role;
+        }
+      });
+      wrap.appendChild(roleSelect);
+
       const del = document.createElement("button");
       del.className = "ghost-danger small";
       del.textContent = "Delete";

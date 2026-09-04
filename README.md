@@ -6,7 +6,7 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
 ## Features
 **Accounts**
 - Sign-in with per-user accounts, optional TOTP two-factor and single-use recovery codes
-- Administrator and user roles; every write is attributed to the user who made it
+- Administrator, user and read-only viewer roles; every write is attributed to the user who made it
 - Can run behind an authentication reverse proxy instead (Authelia, Authentik, oauth2-proxy)
 - SSH host keys are remembered on first connection and checked every time after, so the
   PBX password is never sent to a host that is not the one you connected to before
@@ -339,8 +339,13 @@ offers to enrol two-factor straight away.
 ### Roles
 | Role | Can do |
 |---|---|
-| Administrator | Everything, plus add/remove users, reset another user's two-factor and forget a changed SSH host key |
-| User | Connect to a PBX, edit and bulk edit configs, read the change log |
+| Administrator | Everything, plus add/remove users, change roles, reset another user's two-factor and forget a changed SSH host key |
+| User | Connect to a PBX, edit and bulk edit configs, restore, resync, read the change log |
+| Viewer | Connect to a PBX and look: open phones, preview a bulk edit, read history and the change log. Cannot change anything on the PBX or in the app |
+
+Roles are enforced by the server on every request, not just hidden in the interface. An
+administrator sets a role when adding an account and can change it later from **Users**;
+nobody can change their own role, and the last administrator cannot be demoted.
 
 Every write records **which user made it** in the Change Log. Entries written before
 authentication existed show `-`.

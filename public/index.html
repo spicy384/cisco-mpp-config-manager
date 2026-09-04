@@ -132,7 +132,7 @@
         <strong id="connected-server-name">Connected</strong>
         <span id="connected-fingerprint" class="fingerprint" title="SSH host key fingerprint"></span>
         <button type="button" id="expand-connection-btn" class="secondary small">Expand</button>
-        <button type="button" id="disconnect-mini-btn" class="secondary small">Disconnect</button>
+        <button type="button" id="disconnect-mini-btn" class="secondary small writer-only">Disconnect</button>
       </div>
 
       <form id="connect-form">
@@ -163,18 +163,18 @@
           <label>Test resync while connected
             <input id="resync-test-ext" placeholder="1001" />
           </label>
-          <button type="button" id="resync-test-btn" class="secondary">Test Resync</button>
+          <button type="button" id="resync-test-btn" class="secondary writer-only">Test Resync</button>
         </div>
         <pre id="resync-test-output" class="resync-output" hidden></pre>
         <label>Password (required to connect) <input name="password" type="password" required /></label>
 
         <div class="actions">
           <button type="submit">Connect</button>
-          <button type="button" id="save-server-btn" class="secondary">Save Server</button>
-          <button type="button" id="disconnect-btn" class="secondary">Disconnect</button>
+          <button type="button" id="save-server-btn" class="secondary writer-only">Save Server</button>
+          <button type="button" id="disconnect-btn" class="secondary writer-only">Disconnect</button>
           <button type="button" id="collapse-connection-btn" class="secondary" hidden>Collapse</button>
           <span class="actions-spacer"></span>
-          <button type="button" id="delete-server-btn" class="ghost-danger">Delete Server</button>
+          <button type="button" id="delete-server-btn" class="ghost-danger writer-only">Delete Server</button>
         </div>
       </form>
 
@@ -193,7 +193,7 @@
           (use the key file matching the type in use).
         </p>
         <div class="actions">
-          <button type="button" id="forget-host-key-btn" class="danger">Forget stored key and reconnect</button>
+          <button type="button" id="forget-host-key-btn" class="danger writer-only">Forget stored key and reconnect</button>
         </div>
         <p id="host-key-admin-note" class="host-key-help" hidden>
           Only an administrator can forget a stored host key.
@@ -296,7 +296,7 @@
             </div>
             <p class="quick-preview">Will write: <code id="quick-button-preview">-</code></p>
             <div class="actions">
-              <button type="button" id="quick-button-apply">Apply</button>
+              <button type="button" id="quick-button-apply" class="writer-only">Apply</button>
             </div>
           </div>
 
@@ -304,7 +304,7 @@
           <div id="quick-settings" class="quick-settings"></div>
 
           <div class="actions quick-footer">
-            <button id="resync-quick-btn" type="button" class="secondary" title="Tell this phone to fetch its configuration now">Resync Phone</button>
+            <button id="resync-quick-btn" type="button" class="secondary writer-only" title="Tell this phone to fetch its configuration now">Resync Phone</button>
             <span class="quick-footer-hint">
               Quick changes are written to the PBX as you apply them. When you are done, resync
               so the open phone picks them up. For the selected phones, tick
@@ -316,8 +316,8 @@
         <!-- Advanced: the original raw tag editor -->
         <div id="panel-advanced" class="tab-panel" hidden>
         <div class="toolbar">
-          <button id="save-top-btn" type="button">Save / Upload</button>
-          <button id="resync-top-btn" type="button" class="secondary" title="Tell this phone to fetch its configuration now">Resync Phone</button>
+          <button id="save-top-btn" type="button" class="writer-only">Save / Upload</button>
+          <button id="resync-top-btn" type="button" class="secondary writer-only" title="Tell this phone to fetch its configuration now">Resync Phone</button>
           <button id="create-top-btn" type="button" class="secondary">Create New</button>
           <button id="reset-top-btn" type="button" class="secondary">Reset</button>
           <span class="toolbar-divider" aria-hidden="true"></span>
@@ -338,7 +338,7 @@
             <label>Save Template As
               <input id="template-name" placeholder="My Office Template" />
             </label>
-            <button id="save-template-btn" type="button" class="secondary">Save Template</button>
+            <button id="save-template-btn" type="button" class="secondary writer-only">Save Template</button>
           </div>
         </details>
 
@@ -362,9 +362,9 @@
         </div>
 
         <div class="actions">
-          <button id="save-btn" type="button">Save / Upload</button>
-          <button id="resync-btn" type="button" class="secondary" title="Tell this phone to fetch its configuration now">Resync Phone</button>
-          <button id="create-btn" type="button" class="secondary">Create New</button>
+          <button id="save-btn" type="button" class="writer-only">Save / Upload</button>
+          <button id="resync-btn" type="button" class="secondary writer-only" title="Tell this phone to fetch its configuration now">Resync Phone</button>
+          <button id="create-btn" type="button" class="secondary writer-only">Create New</button>
           <button id="reset-btn" type="button" class="secondary">Reset</button>
           <button id="show-all-bottom-btn" type="button" class="secondary">Show All Fields</button>
         </div>
@@ -399,9 +399,9 @@
 
       <div class="actions">
         <button id="bulk-preview-btn" type="button">Preview Changes</button>
-        <button id="bulk-apply-btn" type="button" class="danger" disabled>Apply to PBX</button>
-        <button id="bulk-rollback-btn" type="button" class="secondary" hidden>Roll Back This Batch</button>
-        <label class="check-inline" title="After writing, tell each changed phone to fetch its configuration">
+        <button id="bulk-apply-btn" type="button" class="danger writer-only" disabled>Apply to PBX</button>
+        <button id="bulk-rollback-btn" type="button" class="secondary writer-only" hidden>Roll Back This Batch</button>
+        <label class="check-inline writer-only" title="After writing, tell each changed phone to fetch its configuration">
           <input type="checkbox" id="bulk-resync" />
           Resync changed phones after applying
         </label>
@@ -439,7 +439,7 @@
         </label>
         <button id="log-refresh-btn" type="button" class="secondary">Refresh</button>
         <button id="log-export-btn" type="button" class="secondary">Export CSV</button>
-        <button id="log-clear-btn" type="button" class="ghost-danger">Clear Log</button>
+        <button id="log-clear-btn" type="button" class="ghost-danger writer-only">Clear Log</button>
       </div>
 
       <div id="log-results" class="bulk-results"></div>
@@ -453,6 +453,8 @@
       <p class="bulk-hint">
         Everyone who signs in gets their own account, and the Change Log records which user
         made each change. Two-factor is enrolled by each user from <strong>Account</strong>.
+        <strong>Users</strong> can edit phones; <strong>viewers</strong> can open phones, history
+        and the log but change nothing; <strong>administrators</strong> also manage accounts.
       </p>
 
       <div class="bulk-controls">
@@ -462,6 +464,7 @@
           <select id="new-role">
             <option value="user">User</option>
             <option value="admin">Administrator</option>
+            <option value="viewer">Viewer (read-only)</option>
           </select>
         </label>
         <button id="add-user-btn" type="button">Add User</button>

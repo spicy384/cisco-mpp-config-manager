@@ -1512,6 +1512,16 @@ body.auth-locked .header-actions {
   }
 }
 
+/* Read-only accounts never see a control they are not allowed to use. */
+body.role-viewer .writer-only {
+  display: none !important;
+}
+
+.viewer-note {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* Buttons are inline-flex, which would otherwise override the hidden attribute. */
 [hidden] {
   display: none !important;

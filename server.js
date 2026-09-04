@@ -1081,6 +1081,12 @@ async function runBulkJob(job) {
 }
 
 app.post("/api/bulk-edit", (req, res) => {
+  // Previews are read-only and fine for viewers; applying is not. Checked before
+  // anything else so the answer is the same whether or not a PBX is connected.
+  if (req.body?.dryRun === false && req.user?.role === "viewer") {
+    return res.status(403).json({ error: "This account is read-only: you can preview a bulk edit but not apply it." });
+  }
+
   try {
     ensureConnected();
     pruneBulkJobs();
@@ -1167,7 +1173,7 @@ app.post("/api/bulk-edit", (req, res) => {
 });
 
 // Undoes a completed apply as one job, so the same progress UI applies.
-app.post("/api/bulk-edit/:jobId/rollback", (req, res) => {
+app.post("/api/bulk-edit/:jobId/rollback", authGuard.requireWriter, (req, res) => {
   try {
     ensureConnected();
     pruneBulkJobs();
@@ -1280,7 +1286,7 @@ app.get("/api/logs/:scopeKey", (req, res) => {
   });
 });
 
-app.delete("/api/logs/:scopeKey", (req, res) => {
+app.delete("/api/logs/:scopeKey", authGuard.requireWriter, (req, res) => {
   const key = String(req.params.scopeKey || "");
   const log = loadChangeLog();
 
@@ -1300,7 +1306,7 @@ app.get("/api/servers", (req, res) => {
   res.json({ servers });
 });
 
-app.post("/api/servers", (req, res) => {
+app.post("/api/servers", authGuard.requireWriter, (req, res) => {
   try {
     const profile = sanitizeServerProfile(req.body || {});
     const servers = loadServers();
@@ -1319,7 +1325,7 @@ app.post("/api/servers", (req, res) => {
   }
 });
 
-app.delete("/api/servers/:id", (req, res) => {
+app.delete("/api/servers/:id", authGuard.requireWriter, (req, res) => {
   const id = String(req.params.id || "").trim();
   if (!id) {
     return res.status(400).json({ error: "Server id is required." });
@@ -1358,7 +1364,7 @@ app.get("/api/templates/:id", (req, res) => {
   return res.json(template);
 });
 
-app.post("/api/templates", (req, res) => {
+app.post("/api/templates", authGuard.requireWriter, (req, res) => {
   try {
     const name = String(req.body?.name || "").trim();
     const rootKey = String(req.body?.rootKey || "flat-profile").trim() || "flat-profile";
@@ -1595,7 +1601,7 @@ app.get("/api/files/:name", async (req, res) => {
   }
 });
 
-app.post("/api/files/:name", async (req, res) => {
+app.post("/api/files/:name", authGuard.requireWriter, async (req, res) => {
   try {
     ensureConnected();
 
@@ -1699,7 +1705,7 @@ app.get("/api/files/:name/history/:id", async (req, res) => {
   }
 });
 
-app.post("/api/files/:name/restore", async (req, res) => {
+app.post("/api/files/:name/restore", authGuard.requireWriter, async (req, res) => {
   try {
     ensureConnected();
 
@@ -1721,7 +1727,7 @@ app.post("/api/files/:name/restore", async (req, res) => {
 });
 
 // --- resync -----------------------------------------------------------------
-app.post("/api/files/:name/resync", async (req, res) => {
+app.post("/api/files/:name/resync", authGuard.requireWriter, async (req, res) => {
   try {
     ensureConnected();
     const fileName = sanitizeFileName(req.params.name);
@@ -1743,7 +1749,7 @@ app.post("/api/files/:name/resync", async (req, res) => {
 
 // Runs the resync command for a typed extension and shows exactly what the PBX said,
 // for working out group membership, sudo, or PJSIP-vs-chan_sip problems.
-app.post("/api/resync/test", async (req, res) => {
+app.post("/api/resync/test", authGuard.requireWriter, async (req, res) => {
   try {
     ensureConnected();
     const ext = String(req.body?.ext || "").trim();
@@ -1758,7 +1764,7 @@ app.post("/api/resync/test", async (req, res) => {
   }
 });
 
-app.post("/api/files", async (req, res) => {
+app.post("/api/files", authGuard.requireWriter, async (req, res) => {
   try {
     ensureConnected();
 
@@ -1801,7 +1807,7 @@ app.post("/api/files", async (req, res) => {
   }
 });
 
-app.delete("/api/connection", async (req, res) => {
+app.delete("/api/connection", authGuard.requireWriter, async (req, res) => {
   if (!sftp) {
     connection = null;
     return res.json({ ok: true });

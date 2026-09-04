@@ -27,6 +27,9 @@ const LOCKOUT_MS = 15 * 60 * 1000;
 // Methods that change state require a CSRF token.
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
+// admin: everything. user: edits phones. viewer: read-only.
+const ROLES = new Set(["admin", "user", "viewer"]);
+
 function createAuth({ dataDir }) {
   const USERS_FILE = path.join(dataDir, "users.json");
   const SESSIONS_FILE = path.join(dataDir, "sessions.json");
@@ -300,6 +303,14 @@ function createAuth({ dataDir }) {
     return next();
   }
 
+  /** Viewers can look at everything but change nothing on the PBX or in the app. */
+  function requireWriter(req, res, next) {
+    if (req.user?.role === "viewer") {
+      return res.status(403).json({ error: "This account is read-only. Ask an administrator for the user role to make changes." });
+    }
+    return next();
+  }
+
   // --- routes --------------------------------------------------------------
 
   const router = express.Router();
@@ -565,7 +576,7 @@ function createAuth({ dataDir }) {
   router.post("/api/users", requireAuth, requireAdmin, (req, res) => {
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
-    const role = req.body?.role === "admin" ? "admin" : "user";
+    const role = ROLES.has(req.body?.role) ? req.body.role : "user";
 
     if (!/^[a-zA-Z0-9._-]{3,32}$/.test(username)) {
       return res.status(400).json({ error: "Username must be 3-32 characters (letters, numbers, . _ -)." });
@@ -618,6 +629,28 @@ function createAuth({ dataDir }) {
     return res.json({ ok: true });
   });
 
+  router.post("/api/users/:id/role", requireAuth, requireAdmin, (req, res) => {
+    const role = String(req.body?.role || "");
+    if (!ROLES.has(role)) {
+      return res.status(400).json({ error: "Role must be admin, user or viewer." });
+    }
+
+    const users = loadUsers();
+    const target = users.find((u) => u.id === String(req.params.id));
+    if (!target) {
+      return res.status(404).json({ error: "User not found." });
+    }
+    if (target.id === req.user.id) {
+      return res.status(400).json({ error: "You cannot change your own role." });
+    }
+    if (target.role === "admin" && role !== "admin" && users.filter((u) => u.role === "admin").length === 1) {
+      return res.status(400).json({ error: "Cannot demote the last administrator." });
+    }
+
+    updateUser(target.id, { role });
+    return res.json({ ok: true, user: publicUser({ ...target, role }) });
+  });
+
   /** Admin escape hatch for a user who has lost their authenticator. */
   router.post("/api/users/:id/reset-mfa", requireAuth, requireAdmin, (req, res) => {
     const target = findUserById(String(req.params.id));
@@ -637,6 +670,7 @@ function createAuth({ dataDir }) {
     router,
     requireAuth,
     requireAdmin,
+    requireWriter,
     hasUsers,
     loadUsers,
     findUser,

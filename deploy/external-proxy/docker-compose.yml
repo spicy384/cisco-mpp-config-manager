@@ -15,7 +15,8 @@ services:
   pbx-manager:
     build:
       context: ../..
-    image: pbx-mpp-config-manager
+    # Published image (docker compose pull), or build from the checkout with --build.
+    image: ghcr.io/spicy384/cisco-mpp-config-manager:latest
     container_name: pbx-manager
     restart: unless-stopped
 

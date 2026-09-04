@@ -1,7 +1,11 @@
 services:
   pbx-manager:
+    # The published image, built by GitHub Actions from main for amd64 and arm64:
+    #   docker compose pull && docker compose up -d
+    # Or build from this checkout, which tags the result with the same name:
+    #   docker compose up -d --build
+    image: ghcr.io/spicy384/cisco-mpp-config-manager:latest
     build: .
-    image: pbx-mpp-config-manager
     container_name: pbx-manager
     restart: unless-stopped
 

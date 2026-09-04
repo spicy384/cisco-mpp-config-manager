@@ -393,10 +393,35 @@ The container logs which template it resolved at startup, so check `docker compo
 | `PROXY_USER_HEADER` | `remote-user` | Which header carries the username in that mode |
 
 ### Updating
+Either pull the published image:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+or, after a `git pull`, build from source:
+
 ```bash
 docker compose up -d --build
 ```
-The volume is untouched by a rebuild, so your servers and change log carry over.
+
+The volume is untouched either way, so your servers, accounts and change log carry over.
+
+### The published image
+Every push to `main` builds `ghcr.io/spicy384/cisco-mpp-config-manager:latest` for
+amd64 and arm64 through GitHub Actions; a tag such as `v1.2.0` also publishes `:1.2.0`
+and `:1.2`, and every build is reachable as `:sha-<commit>`. The compose file names this
+image, so a management server needs nothing but Docker and the compose file:
+
+```bash
+mkdir -p ~/pbx-manager && cd ~/pbx-manager
+curl -fsSLO https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/docker-compose.yml
+docker compose up -d
+```
+
+To pin a version rather than follow `latest`, change the tag in the compose file. Pulling
+needs no sign-in once the package is public; until then, `docker login ghcr.io` with a
+GitHub token that has `read:packages`.
 
 ## Accounts and two-factor authentication
 The app has its own sign-in. On first run it asks you to create an administrator, then

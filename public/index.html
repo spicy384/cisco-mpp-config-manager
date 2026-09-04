@@ -304,11 +304,12 @@
           <div id="quick-settings" class="quick-settings"></div>
 
           <div class="actions quick-footer">
+            <button id="save-quick-btn" type="button" class="writer-only">Save / Upload</button>
             <button id="resync-quick-btn" type="button" class="secondary writer-only" title="Tell this phone to fetch its configuration now">Resync Phone</button>
             <span class="quick-footer-hint">
-              Quick changes are written to the PBX as you apply them. When you are done, resync
-              so the open phone picks them up. For the selected phones, tick
-              <strong>Resync changed phones after applying</strong> in Bulk Edit instead.
+              For the open phone, <strong>Apply</strong> stages each change here; <strong>Save / Upload</strong>
+              writes them to the PBX, then <strong>Resync Phone</strong> makes the phone fetch them.
+              For the selected phones, Apply goes through Bulk Edit, which has its own resync tick box.
             </span>
           </div>
         </div>

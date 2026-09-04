@@ -63,6 +63,7 @@ const resyncTestOutput = document.getElementById("resync-test-output");
 const resyncBtn = document.getElementById("resync-btn");
 const resyncTopBtn = document.getElementById("resync-top-btn");
 const resyncQuickBtn = document.getElementById("resync-quick-btn");
+const saveQuickBtn = document.getElementById("save-quick-btn");
 const bulkResyncInput = document.getElementById("bulk-resync");
 const bulkProgressEl = document.getElementById("bulk-progress");
 const bulkProgressLabelEl = document.getElementById("bulk-progress-label");
@@ -87,6 +88,9 @@ const editorCountEl = document.getElementById("editor-count");
 const rowTemplate = document.getElementById("row-template");
 
 let currentFile = "";
+// The exact state of the open file as loaded, so a save can be refused if the file
+// changed on the PBX in the meantime.
+let currentFileVersion = null;
 let hideEmpty = false;
 let showAllFields = false;
 let baseline = { rootKey: "flat-profile", entries: [] };
@@ -548,6 +552,7 @@ async function loadFile(name) {
   const data = await api(`/api/files/${encodeURIComponent(name)}`);
 
   currentFile = data.fileName;
+  currentFileVersion = data.version || null;
   fileNameInput.value = data.fileName;
   rootKeyInput.value = data.rootKey || "flat-profile";
 
@@ -587,13 +592,28 @@ async function saveCurrentFile() {
 
   const entries = readEntries();
   const rootKey = rootKeyInput.value.trim() || "flat-profile";
+  // Only guard the file that was actually loaded; saving under a new name is a create.
+  const expectedVersion = fileName === currentFile ? currentFileVersion : null;
 
-  await api(`/api/files/${encodeURIComponent(fileName)}`, {
-    method: "POST",
-    body: JSON.stringify({ rootKey, entries })
-  });
+  let result;
+  try {
+    result = await api(`/api/files/${encodeURIComponent(fileName)}`, {
+      method: "POST",
+      body: JSON.stringify({ rootKey, entries, expectedVersion })
+    });
+  } catch (error) {
+    if (error.data?.conflict) {
+      setStatus(error.message, true);
+      if (confirm(`${error.message}\n\nReload ${fileName} now? The edits in the editor will be discarded.`)) {
+        await loadFile(fileName);
+      }
+      return;
+    }
+    throw error;
+  }
 
   currentFile = fileName;
+  currentFileVersion = result.version || null;
   loadEntriesIntoEditor(entries);
   setBaseline(rootKey, entries);
   renderFileList(getFilteredFiles());
@@ -1459,6 +1479,10 @@ async function testResync() {
   resyncTestOutput.hidden = false;
   setStatus(result.ok ? `Resync command worked for ${ext}.` : `Resync command failed for ${ext}; see the output below.`, !result.ok);
 }
+
+saveQuickBtn.addEventListener("click", () => {
+  saveCurrentFile().catch((error) => setStatus(error.message, true));
+});
 
 for (const btn of [resyncBtn, resyncTopBtn, resyncQuickBtn]) {
   btn.addEventListener("click", () => {

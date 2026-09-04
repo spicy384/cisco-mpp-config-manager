@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
@@ -715,6 +716,27 @@ function jobToJson(job) {
     resyncTotal: job.resyncTotal || 0,
     resyncDone: job.resyncDone || 0
   };
+}
+
+/**
+ * Identifies one exact state of a file. The editor is given this when it opens a
+ * file and hands it back on save, so a save can be refused if someone else wrote
+ * the file in between.
+ */
+function contentVersion(text) {
+  return crypto.createHash("sha256").update(String(text), "utf8").digest("hex");
+}
+
+/** Who last wrote a file through this app, from the change log, for conflict messages. */
+function lastLoggedWrite(scope, fileName) {
+  const bucket = scope ? loadChangeLog()[scope.key] : null;
+  const entries = bucket && Array.isArray(bucket.entries) ? bucket.entries : [];
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    if (entries[i].file === fileName && entries[i].status !== "error") {
+      return { user: entries[i].user || "", ts: entries[i].ts };
+    }
+  }
+  return null;
 }
 
 /**
@@ -1595,7 +1617,7 @@ app.get("/api/files/:name", async (req, res) => {
 
     const { rootKey, entries } = xmlToEntries(xmlText);
 
-    res.json({ fileName, rootKey, entries, xmlText });
+    res.json({ fileName, rootKey, entries, xmlText, version: contentVersion(xmlText) });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1615,9 +1637,34 @@ app.post("/api/files/:name", authGuard.requireWriter, async (req, res) => {
     const scope = buildLogScope(connection);
     const user = req.user ? req.user.username : "";
 
+    // Read the file as it is now. Null means a brand new file.
+    let currentXml = null;
+    if (await sftp.exists(remotePath)) {
+      const existing = await sftp.get(remotePath);
+      currentXml = Buffer.isBuffer(existing) ? existing.toString("utf8") : String(existing);
+    }
+
+    // Refuse to overwrite a change made since the editor loaded the file. Checked
+    // before anything is stored so a refused save leaves no trace.
+    const expectedVersion = req.body?.expectedVersion ? String(req.body.expectedVersion) : null;
+    if (expectedVersion && currentXml !== null && contentVersion(currentXml) !== expectedVersion) {
+      const last = lastLoggedWrite(scope, fileName);
+      const by = last
+        ? ` The last write through this app was by ${last.user || "an unknown user"} at ${new Date(last.ts).toISOString()}.`
+        : "";
+      return res.status(409).json({
+        error: `${fileName} changed on the PBX since you opened it, so your version was not saved.${by} Reload to see the current file.`,
+        conflict: true,
+        currentVersion: contentVersion(currentXml),
+        lastWrite: last
+      });
+    }
+
     // Keep the file as it is now. It is what Restore brings back, and it is the
-    // "before" side of the field-level diff in the log. Null means a brand new file.
-    const snapshot = await snapshotBeforeWrite(scope, fileName, remotePath, { user, reason: "save" });
+    // "before" side of the field-level diff in the log.
+    const snapshot = currentXml === null
+      ? null
+      : await snapshotBeforeWrite(scope, fileName, remotePath, { user, reason: "save", xmlText: currentXml });
     const previousEntries = snapshot ? xmlToEntries(snapshot.xmlText).entries : null;
 
     await sftp.put(Buffer.from(xml, "utf8"), remotePath);
@@ -1650,7 +1697,7 @@ app.post("/api/files/:name", authGuard.requireWriter, async (req, res) => {
 
     appendLogEntries(scope, logEntries, user);
 
-    res.json({ ok: true, message: `Saved ${fileName}`, fileName });
+    res.json({ ok: true, message: `Saved ${fileName}`, fileName, version: contentVersion(xml) });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

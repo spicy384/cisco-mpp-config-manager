@@ -20,6 +20,8 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
 - Soft-delete rows with one-click Undo, duplicate rows, reset to the last loaded state
 - Show only important fields, or hide empty ones; search across tag, value and attributes
 - `Ctrl`/`Cmd`+`S` to save; Save buttons at the top and bottom of the editor
+- A save is refused if the file changed on the PBX since it was opened, naming the last
+  writer, so two people editing the same phone cannot silently overwrite each other
 - Create new config files from a template and upload them
 
 **Bulk changes and history**

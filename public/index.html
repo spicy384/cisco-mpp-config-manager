@@ -377,6 +377,46 @@
       </div>
     </section>
 
+    <section class="panel" id="find-panel">
+      <div class="panel-head">
+        <h2>Find in Configs</h2>
+        <span id="find-count" class="badge">Not searched yet</span>
+      </div>
+      <p class="bulk-hint">
+        Search every phone config on the PBX for a tag, a value, or both. Nothing is written.
+        <strong>Select Matching Phones</strong> ticks the results in the list, ready for a bulk edit.
+      </p>
+
+      <div class="bulk-controls">
+        <label>Tag (optional; * matches anything) <input id="find-tag" placeholder="Extended_Function_*" /></label>
+        <label>Value (optional) <input id="find-value" placeholder="sub=1001@" /></label>
+        <label>Match
+          <select id="find-mode">
+            <option value="contains">Contains (ignores case)</option>
+            <option value="exact">Exactly</option>
+            <option value="regex">Regular expression</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="actions">
+        <button id="find-btn" type="button">Find</button>
+        <button id="find-select-btn" type="button" class="secondary" hidden>Select Matching Phones</button>
+      </div>
+
+      <div id="find-progress" class="bulk-progress" hidden>
+        <div class="bulk-progress-head">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="find-progress-label">Searching...</span>
+        </div>
+        <div class="progress-track">
+          <div id="find-progress-bar" class="progress-bar"></div>
+        </div>
+      </div>
+
+      <div id="find-results" class="bulk-results"></div>
+    </section>
+
     <section class="panel" id="bulk-panel">
       <div class="panel-head">
         <h2>Bulk Edit</h2>

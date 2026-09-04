@@ -65,6 +65,16 @@ const resyncTopBtn = document.getElementById("resync-top-btn");
 const resyncQuickBtn = document.getElementById("resync-quick-btn");
 const saveQuickBtn = document.getElementById("save-quick-btn");
 const statusCommandInput = document.getElementById("status-command");
+const findTagInput = document.getElementById("find-tag");
+const findValueInput = document.getElementById("find-value");
+const findModeSelect = document.getElementById("find-mode");
+const findBtn = document.getElementById("find-btn");
+const findSelectBtn = document.getElementById("find-select-btn");
+const findCountEl = document.getElementById("find-count");
+const findProgressEl = document.getElementById("find-progress");
+const findProgressLabelEl = document.getElementById("find-progress-label");
+const findProgressBarEl = document.getElementById("find-progress-bar");
+const findResultsEl = document.getElementById("find-results");
 const regCountEl = document.getElementById("reg-count");
 const bulkResyncInput = document.getElementById("bulk-resync");
 const bulkProgressEl = document.getElementById("bulk-progress");
@@ -1016,25 +1026,30 @@ async function runBulkJobWithProgress(request, { dryRun, verb }) {
   return pollJobWithProgress(start.jobId, verb);
 }
 
-/** Polls an already-started job to completion, driving the progress bar. */
-async function pollJobWithProgress(jobId, verb) {
-  const start = { jobId };
-  setBulkBusy(true, verb);
-
-  try {
-    for (;;) {
-      const job = await api(`/api/bulk-edit/${encodeURIComponent(start.jobId)}`);
-      updateBulkProgress(job, verb);
-
-      if (job.status !== "running") {
-        if (job.status === "failed") {
-          throw new Error(job.error || "Bulk edit failed.");
-        }
-        return job;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, JOB_POLL_MS));
+/** Polls any server job to completion, reporting each poll to onProgress. */
+async function pollJob(jobId, onProgress) {
+  for (;;) {
+    const job = await api(`/api/bulk-edit/${encodeURIComponent(jobId)}`);
+    if (onProgress) {
+      onProgress(job);
     }
+
+    if (job.status !== "running") {
+      if (job.status === "failed") {
+        throw new Error(job.error || "The job failed.");
+      }
+      return job;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, JOB_POLL_MS));
+  }
+}
+
+/** Polls an already-started bulk job, driving the Bulk Edit progress bar. */
+async function pollJobWithProgress(jobId, verb) {
+  setBulkBusy(true, verb);
+  try {
+    return await pollJob(jobId, (job) => updateBulkProgress(job, verb));
   } finally {
     setBulkBusy(false);
   }
@@ -1568,6 +1583,146 @@ for (const btn of [resyncBtn, resyncTopBtn, resyncQuickBtn]) {
 resyncTestBtn.addEventListener("click", () => {
   testResync().catch((error) => setStatus(error.message, true));
 });
+
+// --- find in all configs ------------------------------------------------------------
+
+let lastFind = null;
+
+function setFindBusy(busy) {
+  findBtn.disabled = busy;
+  findProgressEl.hidden = !busy;
+  if (busy) {
+    findProgressBarEl.style.width = "0%";
+    findProgressLabelEl.textContent = "Searching...";
+  }
+}
+
+function updateFindProgress(job) {
+  const total = job.total || 0;
+  const done = job.processed || 0;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  findProgressBarEl.style.width = `${pct}%`;
+  findProgressLabelEl.textContent = job.currentFile
+    ? `Searching ${done + 1} of ${total}: ${job.currentFile}`
+    : `Searching ${done} of ${total} (${pct}%)`;
+}
+
+function renderFindResults(job) {
+  findResultsEl.replaceChildren();
+  const matched = (job.results || []).filter((r) => r.status === "matched");
+  const errors = (job.results || []).filter((r) => r.status === "error");
+  const valueCount = matched.reduce((n, r) => n + (r.matched || 0), 0);
+
+  findCountEl.textContent = matched.length === 0
+    ? `No matches in ${job.total || 0} file${job.total === 1 ? "" : "s"}`
+    : `${matched.length} of ${job.total} phone${job.total === 1 ? "" : "s"} match (${valueCount} value${valueCount === 1 ? "" : "s"})`
+      + (errors.length ? `, ${errors.length} could not be read` : "");
+  findSelectBtn.hidden = matched.length === 0;
+
+  if (matched.length === 0 && errors.length === 0) {
+    return;
+  }
+
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["Phone", "File", "Tag", "Value"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  const addRow = (cells, className) => {
+    const tr = document.createElement("tr");
+    if (className) {
+      tr.className = className;
+    }
+    for (const text of cells) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  };
+
+  for (const item of matched) {
+    for (const [i, m] of item.matches.entries()) {
+      // Repeat the phone only on its first row so the table reads as groups.
+      addRow([i === 0 ? (item.station || "-") : "", i === 0 ? item.name : "", m.tag, m.value], "bulk-row-changed");
+    }
+    if (item.matched > item.matches.length) {
+      addRow(["", "", `...and ${item.matched - item.matches.length} more`, ""], "bulk-row-changed");
+    }
+  }
+  for (const item of errors) {
+    addRow([item.station || "-", item.name, "Could not read", item.error || ""], "bulk-row-error");
+  }
+
+  table.appendChild(tbody);
+  findResultsEl.appendChild(table);
+}
+
+async function runFind() {
+  const criteria = {
+    tag: findTagInput.value.trim(),
+    value: findValueInput.value,
+    mode: findModeSelect.value
+  };
+  if (!criteria.tag && !criteria.value) {
+    setStatus("Enter a tag name, a value, or both to search for.", true);
+    return;
+  }
+
+  const start = await api("/api/search", { method: "POST", body: JSON.stringify(criteria) });
+  setFindBusy(true);
+  let job;
+  try {
+    job = await pollJob(start.jobId, updateFindProgress);
+  } finally {
+    setFindBusy(false);
+  }
+
+  lastFind = { criteria, job };
+  renderFindResults(job);
+  const matched = job.results.filter((r) => r.status === "matched").length;
+  setStatus(matched ? `Found ${matched} matching phone${matched === 1 ? "" : "s"}.` : "No phones matched.");
+}
+
+function selectFoundPhones() {
+  if (!lastFind) {
+    return;
+  }
+  const names = lastFind.job.results.filter((r) => r.status === "matched").map((r) => r.name);
+  selectedFiles.clear();
+  for (const name of names) {
+    selectedFiles.add(name);
+  }
+  renderFileList(getFilteredFiles());
+  onSelectionChanged();
+
+  // A search by an exact tag is usually the prelude to changing it.
+  if (lastFind.criteria.tag && !lastFind.criteria.tag.includes("*")) {
+    bulkKeyInput.value = lastFind.criteria.tag;
+  }
+  setStatus(`Selected ${names.length} phone${names.length === 1 ? "" : "s"} for bulk edit.`);
+  document.getElementById("bulk-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+findBtn.addEventListener("click", () => {
+  runFind().catch((error) => setStatus(error.message, true));
+});
+findSelectBtn.addEventListener("click", selectFoundPhones);
+for (const input of [findTagInput, findValueInput]) {
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      runFind().catch((error) => setStatus(error.message, true));
+    }
+  });
+}
 
 function exportLogCsv() {
   const rows = getFilteredLogEntries();

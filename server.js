@@ -720,6 +720,8 @@ function jobToJson(job) {
     startedAt: job.startedAt,
     finishedAt: job.finishedAt || null,
     rollbackOf: job.request.rollbackOf || null,
+    unmatched: job.unmatched || 0,
+    criteria: job.request.criteria || null,
     resync: Boolean(job.request.resync),
     stage: job.stage || "write",
     resyncTotal: job.resyncTotal || 0,
@@ -883,6 +885,133 @@ async function resyncChangedPhones(job) {
     job.currentFile = item.name;
     item.resync = await sendResync(sftp.client, job.request.resyncCommand, item.ext);
     job.resyncDone += 1;
+  }
+
+  job.currentFile = null;
+}
+
+// --- find in all configs ------------------------------------------------------
+const SEARCH_MODES = new Set(["contains", "exact", "regex"]);
+const MAX_SEARCH_MATCHES_PER_FILE = 20;
+const MAX_SEARCH_PATTERN_LENGTH = 200;
+
+function escapeRegex(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Turns what was typed into the Find panel into tests. A tag matches by name
+ * (case-insensitive, * as a wildcard); a value by containing, equalling, or
+ * matching a regular expression. Either may be omitted, not both.
+ */
+function buildSearchCriteria({ tag, value, mode } = {}) {
+  const tagText = String(tag || "").trim();
+  const valueText = String(value == null ? "" : value);
+  const matchMode = SEARCH_MODES.has(mode) ? mode : "contains";
+
+  if (!tagText && !valueText) {
+    throw new Error("Enter a tag name, a value, or both.");
+  }
+  if (tagText.length > MAX_SEARCH_PATTERN_LENGTH || valueText.length > MAX_SEARCH_PATTERN_LENGTH) {
+    throw new Error(`Search terms are limited to ${MAX_SEARCH_PATTERN_LENGTH} characters.`);
+  }
+
+  let tagTest = null;
+  if (tagText) {
+    if (tagText.includes("*")) {
+      const re = new RegExp(`^${tagText.split("*").map(escapeRegex).join(".*")}$`, "i");
+      tagTest = (key) => re.test(key);
+    } else {
+      const wanted = tagText.toLowerCase();
+      tagTest = (key) => key.toLowerCase() === wanted;
+    }
+  }
+
+  let valueTest = null;
+  if (valueText) {
+    if (matchMode === "regex") {
+      let re;
+      try {
+        re = new RegExp(valueText, "i");
+      } catch (error) {
+        throw new Error(`Invalid regular expression: ${error.message}`);
+      }
+      valueTest = (v) => re.test(v);
+    } else if (matchMode === "exact") {
+      valueTest = (v) => v === valueText;
+    } else {
+      const wanted = valueText.toLowerCase();
+      valueTest = (v) => v.toLowerCase().includes(wanted);
+    }
+  }
+
+  return { tag: tagText, value: valueText, mode: matchMode, tagTest, valueTest };
+}
+
+/** The entries of one file that satisfy the criteria, as { tag, value }. */
+function matchEntries(entries, criteria) {
+  const out = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const key = String(entry?.key || "");
+    const value = String(entry?.value == null ? "" : entry.value);
+    if (criteria.tagTest && !criteria.tagTest(key)) {
+      continue;
+    }
+    if (criteria.valueTest && !criteria.valueTest(value)) {
+      continue;
+    }
+    out.push({ tag: key, value });
+  }
+  return out;
+}
+
+/** Read-only scan of every config on the PBX. Results hold only the files that matched. */
+async function runSearchJob(job) {
+  const { criteria: raw, remoteDir } = job.request;
+  const criteria = buildSearchCriteria(raw);
+
+  const remoteList = await sftp.list(remoteDir);
+  const fileNames = remoteList
+    .filter((item) => item.type !== "d" && /^spa.*\.xml$/i.test(item.name))
+    .map((item) => item.name)
+    .sort((a, b) => a.localeCompare(b));
+
+  job.total = fileNames.length;
+  job.unmatched = 0;
+
+  for (const fileName of fileNames) {
+    job.currentFile = fileName;
+    try {
+      const content = await sftp.get(path.posix.join(remoteDir, fileName));
+      const { entries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
+      const matches = matchEntries(entries, criteria);
+
+      if (matches.length === 0) {
+        job.unmatched += 1;
+        continue;
+      }
+
+      job.results.push({
+        name: fileName,
+        station: findStationDisplayNameInEntries(entries),
+        status: "matched",
+        matched: matches.length,
+        // Same rule as the change log: a password's presence is shown, its value is not.
+        matches: matches.slice(0, MAX_SEARCH_MATCHES_PER_FILE).map((m) => ({
+          tag: m.tag,
+          value: isSensitiveTag(m.tag) && m.value ? REDACTED : m.value
+        }))
+      });
+    } catch (error) {
+      job.results.push({
+        name: fileName,
+        station: fileMetadataCache.get(buildCacheKey(fileName))?.stationDisplayName || "",
+        status: "error",
+        error: error.message
+      });
+    } finally {
+      job.processed += 1;
+    }
   }
 
   job.currentFile = null;
@@ -1200,6 +1329,51 @@ app.post("/api/bulk-edit", (req, res) => {
     launchJob(job, runBulkJob);
 
     return res.status(202).json({ jobId: job.id, total: job.total, dryRun: isDryRun });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// Searches every config on the PBX. Read-only, so any signed-in role may run it.
+app.post("/api/search", (req, res) => {
+  try {
+    ensureConnected();
+    pruneBulkJobs();
+
+    let criteria;
+    try {
+      criteria = buildSearchCriteria(req.body || {});
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
+    if (bulkJobIsRunning()) {
+      return res.status(409).json({ error: "A bulk edit is already running. Wait for it to finish." });
+    }
+
+    const job = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      status: "running",
+      dryRun: true,
+      key: criteria.tag,
+      mode: "find",
+      editCount: 0,
+      total: 0,
+      processed: 0,
+      currentFile: null,
+      results: [],
+      startedAt: Date.now(),
+      finishedAt: null,
+      error: null,
+      request: {
+        criteria: { tag: criteria.tag, value: criteria.value, mode: criteria.mode },
+        remoteDir: connection.remoteDir,
+        scope: buildLogScope(connection),
+        user: req.user ? req.user.username : ""
+      }
+    };
+
+    launchJob(job, runSearchJob);
+    return res.status(202).json({ jobId: job.id, dryRun: true });
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
@@ -2026,6 +2200,8 @@ if (require.main === module) {
 module.exports = {
   app,
   applyBulkEdit,
+  buildSearchCriteria,
+  matchEntries,
   entriesToXml,
   extractStationDisplayName,
   findStationDisplayNameInEntries,

@@ -25,6 +25,8 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
 - Create new config files from a template and upload them
 
 **Bulk changes and history**
+- Find every phone whose config has a given tag or value - which phones still point at the old
+  proxy, which have a BLF to extension 1001 - then tick the results for a bulk edit
 - Bulk edit one tag across many config files at once, preview-first, with live progress
 - Per-server change log of every write, showing field-level before and after, kept between
   connections and exportable to CSV
@@ -119,6 +121,20 @@ Safety behaviour:
   **not** rewritten, so untouched files keep their existing formatting.
 - One unreadable or unwritable file does not abort the batch; it is reported as an error
   and the remaining files still process.
+
+## Find in configs
+**Find in Configs** searches every phone config on the PBX for a tag, a value, or both, and
+lists each match with the phone it belongs to. Nothing is written and nothing is logged.
+
+- The tag matches by name, ignoring case; `*` matches anything, so `Extended_Function_*`
+  finds every programmable key.
+- The value can be matched as *contains* (ignoring case), *exactly*, or as a regular
+  expression.
+- **Select Matching Phones** ticks the results in the file list, ready for Bulk Edit, and
+  fills in the tag if you searched for one.
+
+Password values show as `(hidden)` in the results, as in the change log, though a phone can
+still be found by searching for one.
 
 ## Quick Start
 For a server deployment see [Running in Docker](#running-in-docker). To run it directly:

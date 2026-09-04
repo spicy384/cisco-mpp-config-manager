@@ -117,9 +117,11 @@ documentation and marked *unverified* in the list. If one is wrong for your phon
 | Admin password | `Admin_Passwd` (`ua="rw"`) |
 | Wallpaper | `Phone_Background` = `Download Picture` and `Picture_Download_URL` |
 
-> Quick changes update the editor but are **not written to the PBX until you press
-> Save / Upload** (or, for a bulk change, Apply to PBX). That keeps one save path, so the
-> change log and Reset behave exactly as they do for a manual edit.
+> For the open phone, a Quick change updates the config as soon as you make it, and the
+> Save button says *unsaved changes* until you press **Save / Upload**. That keeps one save
+> path, so the change log, History and Reset behave exactly as they do for a manual edit.
+> For the selected phones, each field has **Preview on selected phones**, which goes
+> through Bulk Edit's preview-then-confirm flow.
 
 ## Bulk Edit
 Change a single setting across all (or selected) phone configs without opening each file.

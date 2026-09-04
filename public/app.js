@@ -66,6 +66,7 @@ const resyncBtn = document.getElementById("resync-btn");
 const resyncTopBtn = document.getElementById("resync-top-btn");
 const resyncQuickBtn = document.getElementById("resync-quick-btn");
 const saveQuickBtn = document.getElementById("save-quick-btn");
+const quickStagedNote = document.getElementById("quick-staged-note");
 const statusCommandInput = document.getElementById("status-command");
 const quickModelSelect = document.getElementById("quick-model");
 const quickKemsLabel = document.getElementById("quick-kems-label");
@@ -200,7 +201,6 @@ function setConnectionCollapsed(collapsed, connectionData = null) {
   const info = connectionData || lastConnectionInfo;
 
   connectForm.hidden = collapsed;
-  statusEl.hidden = collapsed;
   connectionSummary.hidden = !collapsed;
   collapseConnectionBtn.hidden = collapsed;
 
@@ -669,6 +669,7 @@ async function loadFile(name) {
   showAllFields = false;
   loadEntriesIntoEditor(data.entries || []);
   setBaseline(data.rootKey || "flat-profile", data.entries || []);
+  refreshQuickDirty();
 
   renderFileList(getFilteredFiles());
 
@@ -692,6 +693,7 @@ async function loadFile(name) {
 function resetEditorToBaseline() {
   rootKeyInput.value = baseline.rootKey || "flat-profile";
   loadEntriesIntoEditor(deepClone(baseline.entries || []));
+  refreshQuickDirty();
   setStatus("Editor reset to last loaded state.");
 }
 
@@ -728,6 +730,7 @@ async function saveCurrentFile() {
   currentFileVersion = result.version || null;
   loadEntriesIntoEditor(entries);
   setBaseline(rootKey, entries);
+  refreshQuickDirty();
   renderFileList(getFilteredFiles());
   refreshFiles().catch(() => {});
   refreshLogScopes().catch(() => {});
@@ -2457,6 +2460,7 @@ function renderQuickFields() {
     input.addEventListener("input", () => {
       quickFieldValues[field] = input.value;
       updateQuickPreview();
+      liveApplyQuickButton();
     });
 
     label.appendChild(input);
@@ -2503,13 +2507,21 @@ function renderQuickSettings() {
     hint.className = "quick-setting-hint";
     hint.textContent = setting.hint || "";
 
-    const apply = document.createElement("button");
-    apply.type = "button";
-    apply.textContent = "Apply";
-    apply.className = "writer-only";
-    apply.addEventListener("click", () => applyQuickSetting(setting.id, input.value));
+    // For the open phone, leaving the field is enough: the config is updated at once and
+    // Save / Upload writes it. For the selected phones a change must be previewed first.
+    input.addEventListener("change", () => {
+      if (quickScope() === "file") {
+        applyQuickSetting(setting.id, input.value);
+      }
+    });
 
-    row.append(label, apply);
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.textContent = "Preview on selected phones";
+    preview.className = "secondary writer-only quick-bulk-only";
+    preview.addEventListener("click", () => applyQuickSetting(setting.id, input.value));
+
+    row.append(label, preview);
     quickSettingsEl.append(row, hint);
   }
 }
@@ -2576,8 +2588,25 @@ async function applyQuickChange(produced, description) {
 
   mergeIntoEditor(produced);
   renderQuickButtons();
-  setStatus(`${description} set. Not written yet - press Save / Upload.`);
+  refreshQuickDirty();
+  setStatus(`${description} updated. Press Save / Upload to write it to the PBX.`);
 }
+
+/** Whether the editor differs from what was last loaded or saved. */
+function editorIsDirty() {
+  return JSON.stringify(readEntries()) !== JSON.stringify(baseline.entries || []);
+}
+
+/** The Quick tab's Save button says when there is something to write. */
+function refreshQuickDirty() {
+  const dirty = Boolean(currentFile || fileNameInput.value.trim()) && editorIsDirty();
+  saveQuickBtn.textContent = dirty ? "Save / Upload (unsaved changes)" : "Save / Upload";
+  saveQuickBtn.classList.toggle("has-staged", dirty);
+  quickStagedNote.textContent = dirty ? "Unsaved changes. Press Save / Upload to write them to the PBX." : "";
+}
+
+// Edits made directly in the Advanced table count too.
+entriesBody.addEventListener("input", refreshQuickDirty);
 
 function applyQuickSetting(id, value) {
   try {
@@ -2610,13 +2639,39 @@ document.getElementById("quick-button-close").addEventListener("click", () => {
 });
 
 // Changing the type changes which fields exist, so rebuild the form.
-quickTypeSelect.addEventListener("change", renderQuickFields);
+quickTypeSelect.addEventListener("change", () => {
+  renderQuickFields();
+  liveApplyQuickButton();
+});
+
+/**
+ * The open phone's key follows the form as it is filled in. Nothing happens while the
+ * form is incomplete (a speed dial with no number yet), and nothing is written until Save.
+ */
+function liveApplyQuickButton() {
+  if (quickScope() !== "file" || !quickEditingIndex) return;
+  let produced;
+  try {
+    produced = QuickConfig.buildLineKey({
+      index: quickEditingIndex,
+      type: quickTypeSelect.value,
+      server: sipServerForQuick(),
+      ...quickFieldValues
+    });
+  } catch {
+    return;
+  }
+  mergeIntoEditor(produced);
+  renderQuickButtons();
+  refreshQuickDirty();
+}
 
 for (const radio of document.querySelectorAll('input[name="quick-scope"]')) {
   radio.addEventListener("change", updateQuickScopeHints);
 }
 
 function updateQuickScopeHints() {
+  document.body.classList.toggle("quick-scope-bulk", quickScope() === "bulk");
   const bulk = quickScope() === "bulk";
   document.getElementById("quick-scope-file-label").textContent =
     currentFile ? `the open phone (${currentFile})` : "the open phone";

@@ -356,7 +356,7 @@
             </div>
             <p class="quick-preview">Will write: <code id="quick-button-preview">-</code></p>
             <div class="actions">
-              <button type="button" id="quick-button-apply" class="writer-only">Apply</button>
+              <button type="button" id="quick-button-apply" class="secondary writer-only quick-bulk-only">Preview on selected phones</button>
             </div>
           </div>
 
@@ -365,11 +365,12 @@
 
           <div class="actions quick-footer">
             <button id="save-quick-btn" type="button" class="writer-only">Save / Upload</button>
+            <span id="quick-staged-note" class="quick-staged-note"></span>
             <button id="resync-quick-btn" type="button" class="secondary writer-only" title="Tell this phone to fetch its configuration now">Resync Phone</button>
             <span class="quick-footer-hint">
-              For the open phone, <strong>Apply</strong> stages each change here; <strong>Save / Upload</strong>
-              writes them to the PBX, then <strong>Resync Phone</strong> makes the phone fetch them.
-              For the selected phones, Apply goes through Bulk Edit, which has its own resync tick box.
+              Changes you make here update the open phone's config as you go. <strong>Save / Upload</strong>
+              writes it to the PBX, then <strong>Resync Phone</strong> makes the phone fetch it.
+              For the selected phones, each field has a Preview button that goes through Bulk Edit.
             </span>
           </div>
         </div>

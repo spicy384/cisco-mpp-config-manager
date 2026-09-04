@@ -539,6 +539,34 @@ body.theme-dark .icon-moon { display: inline; }
   color: var(--text-muted);
 }
 
+/* Bulk-scope controls appear only when "the selected phones" is chosen. */
+.quick-bulk-only {
+  display: none;
+}
+
+body.quick-scope-bulk .quick-bulk-only {
+  display: inline-flex;
+}
+
+.quick-staged-note {
+  font-size: 12px;
+  color: #b45309;
+}
+
+.quick-staged-note:empty {
+  display: none;
+}
+
+button.is-staged {
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+  border-color: color-mix(in srgb, var(--success) 45%, transparent);
+  color: var(--success);
+}
+
+.quick-footer button.has-staged {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #2563eb) 25%, transparent);
+}
+
 .quick-footer {
   margin-top: 18px;
   padding-top: 14px;
@@ -1122,8 +1150,11 @@ form[hidden],
 }
 
 #connection-panel.collapsed #connect-form,
+/* The status line is the app's only feedback channel, so it stays visible when the
+   panel collapses after connecting; it just sits tighter under the summary row. */
 #connection-panel.collapsed #status {
-  display: none !important;
+  margin-top: 10px;
+  padding: 7px 10px;
 }
 
 #connection-panel.collapsed #connection-summary {

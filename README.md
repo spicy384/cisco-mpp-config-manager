@@ -383,6 +383,7 @@ The container logs which template it resolved at startup, so check `docker compo
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `3000` | Port the app listens on |
+| `PASSKEY_RP_ID`, `PASSKEY_ORIGIN` | from the request | Domain and origin passkeys are bound to, when a proxy hides the real ones |
 | `DATA_DIR` | `./data` (`/data` in the image) | Where the JSON stores are written |
 | `DEFAULT_TEMPLATE_PATH` | unset | Explicit path to the default template XML |
 | `TZ` | `UTC` | Affects timestamps shown in the change log |
@@ -438,6 +439,16 @@ offers to enrol two-factor straight away.
   them - they are stored hashed and cannot be recovered, only regenerated.
 - **A used TOTP code cannot be replayed**, including the one used to enrol. If you enrol
   and immediately sign out, wait for the next code.
+- **Passkeys**: anyone can add passkeys under **Account** (a phone, a laptop, a hardware
+  key; up to ten) and then use **Sign in with a passkey** on the sign-in card. No username,
+  password or code is asked for: the passkey needs the device plus a fingerprint, face or
+  PIN, which is the same two-factor guarantee TOTP gives the password path. The password
+  path stays exactly as it is, so a lost device just means signing in with the password
+  and adding a new passkey. The browser requires HTTPS (localhost excepted) and reaching
+  the app by a **hostname**, because a passkey is bound to the domain it was created on;
+  on plain HTTP or an IP address the button is simply not shown. The domain and origin are
+  taken from the request; `PASSKEY_RP_ID` and `PASSKEY_ORIGIN` override them for a proxy
+  that rewrites hosts.
 - **Lockout**: five failed attempts locks an account for 15 minutes.
 - **Sessions** last 7 days, or 8 hours idle, and survive a restart. Sign out ends them
   immediately.

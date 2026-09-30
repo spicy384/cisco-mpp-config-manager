@@ -4,6 +4,16 @@ const connectionSummary = document.getElementById("connection-summary");
 const connectedServerNameEl = document.getElementById("connected-server-name");
 const connectForm = document.getElementById("connect-form");
 const disconnectBtn = document.getElementById("disconnect-btn");
+const serverAuthSelect = document.getElementById("server-auth");
+const serverPasswordLabel = document.getElementById("server-password-label");
+const sshKeyMetaEl = document.getElementById("sshkey-meta");
+const sshKeyPresentEl = document.getElementById("sshkey-present");
+const sshKeyAbsentEl = document.getElementById("sshkey-absent");
+const sshKeyPublicEl = document.getElementById("sshkey-public");
+const sshKeyFingerprintEl = document.getElementById("sshkey-fingerprint");
+const sshKeyCopyBtn = document.getElementById("sshkey-copy-btn");
+const sshKeyGenerateBtn = document.getElementById("sshkey-generate-btn");
+const sshKeyRemoveBtn = document.getElementById("sshkey-remove-btn");
 const auditPanel = document.getElementById("audit-panel");
 const auditMetaEl = document.getElementById("audit-meta");
 const auditSearchInput = document.getElementById("audit-search");
@@ -628,6 +638,7 @@ function renderServerOptions() {
   quickServerSelect.value = servers.some((s) => s.id === quickSelected)
     ? quickSelected
     : (servers.length === 1 ? servers[0].id : "");
+  syncAuthControls();
 }
 
 function renderTemplateOptions() {
@@ -690,6 +701,19 @@ function fillFormFromServer(serverId) {
   resyncCommandInput.value = server.resyncCommand || "";
   statusCommandInput.value = server.statusCommand || "";
   writeModelControls(profileControls, server.defaultModel || null);
+  serverAuthSelect.value = server.auth === "key" ? "key" : "password";
+  syncAuthControls();
+}
+
+/** True when this saved server signs in with the app's key, so no password is asked for. */
+function serverUsesKey(serverId) {
+  return servers.find((s) => s.id === serverId)?.auth === "key";
+}
+
+/** Password boxes are only shown where a password will actually be used. */
+function syncAuthControls() {
+  serverPasswordLabel.hidden = serverAuthSelect.value === "key";
+  quickPasswordInput.hidden = serverUsesKey(quickServerSelect.value);
 }
 
 async function refreshFiles() {
@@ -964,7 +988,8 @@ async function saveServerProfile() {
     sipServer: sipServerInput.value.trim(),
     resyncCommand: resyncCommandInput.value.trim(),
     statusCommand: statusCommandInput.value.trim(),
-    defaultModel: readModelControls(profileControls)
+    defaultModel: readModelControls(profileControls),
+    auth: serverAuthSelect.value
   };
 
   const data = await api("/api/servers", {
@@ -2737,6 +2762,7 @@ async function clearCurrentLog() {
 
 // What was last sent to connect, so "forget the host key and reconnect" can repeat it.
 let lastConnectBody = null;
+let lastAutoReconnectAt = 0;
 
 connectForm.addEventListener("submit", (e) => {
   e.preventDefault();
@@ -2756,11 +2782,18 @@ manageServersBtn.addEventListener("click", () => {
   showPage("settings", "servers-panel");
 });
 
+quickServerSelect.addEventListener("change", syncAuthControls);
+serverAuthSelect.addEventListener("change", syncAuthControls);
+
 /** Connects with the given form values; used by the bar and by the Settings form alike. */
 async function connectToPbx(body) {
-  if (!body.password) {
+  const withKey = body.profileId ? serverUsesKey(body.profileId) : body.auth === "key";
+  if (!withKey && !body.password) {
     setStatus("Password is required to connect.", true);
     return;
+  }
+  if (withKey) {
+    delete body.password;
   }
   lastConnectBody = { ...body };
 
@@ -2956,6 +2989,17 @@ function handleConnectionLost(data) {
     quickServerSelect.value = data.lastDisconnect.profileId;
   }
   quickPasswordInput.focus();
+
+  // A server that signs in with the app's key needs no password, so reconnect by
+  // itself - once, so a PBX that stays down does not cause a loop.
+  const lostProfile = data.lastDisconnect?.profileId;
+  if (lostProfile && serverUsesKey(lostProfile) && Date.now() - lastAutoReconnectAt > 60000) {
+    lastAutoReconnectAt = Date.now();
+    setTimeout(() => {
+      connectToPbx({ profileId: lostProfile }).catch(() => {});
+    }, 1500);
+    return `${message} Reconnecting with the SSH key...`;
+  }
   return message;
 }
 
@@ -2964,6 +3008,84 @@ disconnectMiniBtn.addEventListener("click", handleDisconnectClick);
 
 expandConnectionBtn.addEventListener("click", () => {
   showPage("settings", "servers-panel");
+});
+
+// --- SSH key --------------------------------------------------------------------------------
+
+let sshKeyInfo = null;
+
+async function refreshSshKey() {
+  sshKeyInfo = await api("/api/ssh-key");
+  renderSshKey();
+}
+
+function renderSshKey() {
+  const info = sshKeyInfo || { exists: false };
+  const admin = currentUser?.role === "admin";
+  const managed = info.source !== "supplied";
+
+  sshKeyPresentEl.hidden = !info.exists;
+  sshKeyAbsentEl.hidden = info.exists;
+  sshKeyCopyBtn.hidden = !info.exists;
+  sshKeyGenerateBtn.hidden = !admin || !managed;
+  sshKeyRemoveBtn.hidden = !admin || !managed || !info.exists;
+  sshKeyGenerateBtn.textContent = info.exists ? "Replace Key" : "Create Key";
+  sshKeyGenerateBtn.className = info.exists ? "secondary" : "";
+
+  if (info.exists) {
+    sshKeyPublicEl.value = info.publicKey;
+    sshKeyFingerprintEl.textContent = info.fingerprint;
+    sshKeyMetaEl.textContent = managed ? `${info.type}, created ${formatTimestamp(info.createdAt)}` : `${info.type}, supplied by SSH_KEY_FILE`;
+  } else {
+    sshKeyMetaEl.textContent = "No key";
+    sshKeyAbsentEl.textContent = info.problem
+      || (admin ? "There is no key yet. Create one to let servers sign in without a password." : "There is no key yet. An administrator can create one.");
+  }
+}
+
+async function generateSshKey() {
+  const replacing = Boolean(sshKeyInfo?.exists);
+  if (replacing && !confirm(
+    "Replace the SSH key?\n\nEvery PBX that trusts the current key will refuse the app until the new public key "
+      + "is installed on it. The old key cannot be recovered."
+  )) {
+    return;
+  }
+  sshKeyInfo = await api("/api/ssh-key", { method: "POST", body: JSON.stringify({ replace: replacing }) });
+  renderSshKey();
+  setStatus(replacing
+    ? "SSH key replaced. Install the new public key on each PBX that signs in with it."
+    : "SSH key created. Install the public key on the PBX, then set the server to sign in with it.");
+}
+
+async function removeSshKey() {
+  if (!confirm(
+    "Remove the SSH key?\n\nServers set to sign in with it will not connect until a key is created and installed again. "
+      + "This does not remove the public key from any PBX."
+  )) {
+    return;
+  }
+  await api("/api/ssh-key", { method: "DELETE" });
+  await refreshSshKey();
+  setStatus("SSH key removed. Its public key is still in authorized_keys on any PBX you added it to.");
+}
+
+sshKeyCopyBtn.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(sshKeyPublicEl.value);
+    setStatus("Public key copied.");
+  } catch {
+    // No clipboard access (plain HTTP, or refused): select it so Ctrl+C works.
+    sshKeyPublicEl.focus();
+    sshKeyPublicEl.select();
+    setStatus("Press Ctrl+C to copy the selected public key.");
+  }
+});
+sshKeyGenerateBtn.addEventListener("click", () => {
+  generateSshKey().catch((error) => setStatus(error.message, true));
+});
+sshKeyRemoveBtn.addEventListener("click", () => {
+  removeSshKey().catch((error) => setStatus(error.message, true));
 });
 
 // --- audit log ------------------------------------------------------------------------------
@@ -3138,6 +3260,7 @@ function showPage(name, panelId = null) {
   }
 
   if (changed && page === "settings" && currentUser) {
+    refreshSshKey().catch((error) => setStatus(error.message, true));
     renderAccountPanel();
     if (currentUser.role === "admin") {
       refreshUsers().catch((error) => setStatus(error.message, true));
@@ -3871,6 +3994,9 @@ function applyIdentity(user, token) {
   accountPanel.hidden = !signedIn;
   usersPanel.hidden = !signedIn || user.role !== "admin";
   auditPanel.hidden = !signedIn || user.role !== "admin";
+  if (signedIn && currentPage === "settings") {
+    refreshSshKey().catch(() => {});
+  }
   if (signedIn && user.role === "admin" && currentPage === "reporting") {
     refreshAudit().catch(() => {});
   }

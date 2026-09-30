@@ -692,7 +692,13 @@
           <label>Username <input name="username" placeholder="root" /></label>
         </div>
 
-        <label>Password (only needed to connect from here) <input name="password" type="password" autocomplete="off" /></label>
+        <label>Sign in to the PBX with
+          <select id="server-auth" name="auth">
+            <option value="password">A password, typed each time</option>
+            <option value="key">The app's SSH key (see SSH Key below)</option>
+          </select>
+        </label>
+        <label id="server-password-label">Password (only needed to connect from here) <input name="password" type="password" autocomplete="off" /></label>
         <label>Remote XML Directory <input name="remoteDir" placeholder="/tftpboot" /></label>
         <label>SIP Server for speed dial / BLF (optional)
           <input id="sip-server" placeholder="pbx.example.com:5060" />
@@ -730,6 +736,36 @@
           <button type="button" id="delete-server-btn" class="ghost-danger writer-only">Delete Server</button>
         </div>
       </form>
+    </section>
+
+    <section class="panel" id="sshkey-panel">
+      <div class="panel-head">
+        <h2>SSH Key</h2>
+        <span id="sshkey-meta" class="badge">Not loaded</span>
+      </div>
+      <p class="bulk-hint">
+        With a key, the app signs in to a PBX by itself and nobody has to type its password.
+        The private key never leaves this server; the public key below is what you install
+        on the PBX.
+      </p>
+
+      <div id="sshkey-present" hidden>
+        <label>Public key
+          <textarea id="sshkey-public" class="mono" rows="3" readonly spellcheck="false"></textarea>
+        </label>
+        <p class="bulk-hint">
+          Fingerprint <code id="sshkey-fingerprint"></code>. On the PBX, as the user the app
+          connects as, add the public key as one line to <code>~/.ssh/authorized_keys</code>.
+          Then set that server's sign-in to <em>The app's SSH key</em> under PBX Servers.
+        </p>
+      </div>
+      <p id="sshkey-absent" class="empty-state" hidden></p>
+
+      <div class="actions">
+        <button id="sshkey-copy-btn" type="button" class="secondary" hidden>Copy Public Key</button>
+        <button id="sshkey-generate-btn" type="button" hidden>Create Key</button>
+        <button id="sshkey-remove-btn" type="button" class="ghost-danger" hidden>Remove Key</button>
+      </div>
     </section>
 
     <section class="panel" id="users-panel" hidden>

@@ -1653,6 +1653,15 @@ body.auth-locked .header-actions {
   overflow-wrap: anywhere;
 }
 
+#sshkey-panel textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
 #provision-panel textarea {
   width: 100%;
   resize: vertical;

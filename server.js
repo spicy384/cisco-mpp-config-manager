@@ -59,6 +59,9 @@ const { resolveTlsOptions } = require("./tls-setup");
 const { quickSchema, normalizeModelChoice } = require("./public/quick-config");
 const { macToFileName } = require("./public/csv-rows");
 const authGuard = createAuth({ dataDir: DATA_DIR });
+const { createSshKeyStore } = require("./ssh-key");
+// The app's own SSH key, for profiles set to sign in with a key instead of a password.
+const sshKey = createSshKeyStore({ dataDir: DATA_DIR });
 const { createAuditLog } = require("./audit-log");
 // Who did what to the app itself (sign-ins, accounts, servers, keys). Phone config
 // changes are in the change log.
@@ -155,12 +158,15 @@ const AUDIT_RULES = [
       const conn = body && body.connection;
       const profile = req.body?.profileId ? loadServers().find((s) => s.id === String(req.body.profileId)) : null;
       const target = conn ? (conn.profileName || conn.host) : (profile ? profile.name : String(req.body?.host || "").trim());
-      return { target, detail: conn ? `${conn.username}@${conn.host}:${conn.port} ${conn.remoteDir}` : undefined };
+      return { target, detail: conn ? `${conn.username}@${conn.host}:${conn.port} ${conn.remoteDir}, ${conn.auth === "key" ? "SSH key" : "password"}` : undefined };
     } },
   { method: "DELETE", path: /^\/api\/connection$/, action: "pbx-disconnect",
     prepare: () => ({ target: connection ? (connection.profileName || connection.host) : "" }),
     describe: (req) => ({ target: req.auditContext.target }),
     skip: (req) => !req.auditContext.target },
+  { method: "POST", path: /^\/api\/ssh-key$/, action: "ssh-key-generated",
+    describe: (req, res, body) => ({ target: body && body.fingerprint ? body.fingerprint : "", detail: res.statusCode < 400 && req.body?.replace === true ? "replaced the previous key" : undefined }) },
+  { method: "DELETE", path: /^\/api\/ssh-key$/, action: "ssh-key-removed" },
   { method: "POST", path: /^\/api\/known-hosts\/forget$/, action: "host-key-forgotten",
     describe: (req) => ({ target: `${String(req.body?.host || "").trim()}:${Number(req.body?.port) || 22}` }) },
   { method: "DELETE", path: /^\/api\/logs\/(.+)$/, action: "change-log-cleared",
@@ -510,6 +516,8 @@ function sanitizeServerProfile(input) {
   const resyncCommand = validateResyncCommand(input?.resyncCommand);
   // How to list registered phones. Blank means "pjsip show contacts".
   const statusCommand = validateStatusCommand(input?.statusCommand);
+  // "key" signs in with the app's SSH key, so nobody types the PBX password.
+  const auth = input?.auth === "key" ? "key" : "password";
   // Which phone model new and unassigned configs are assumed to be. Null means the app default.
   const defaultModel = normalizeModelChoice({
     model: input?.defaultModel?.model ?? input?.defaultModel,
@@ -535,7 +543,8 @@ function sanitizeServerProfile(input) {
     sipServer,
     resyncCommand,
     statusCommand,
-    defaultModel
+    defaultModel,
+    auth
   };
 }
 
@@ -2320,10 +2329,6 @@ app.post("/api/templates", authGuard.requireWriter, (req, res) => {
 app.post("/api/connect", async (req, res) => {
   const { profileId, host, port, username, password, remoteDir } = req.body || {};
 
-  if (!password) {
-    return res.status(400).json({ error: "password is required." });
-  }
-
   let target = null;
 
   if (profileId) {
@@ -2342,8 +2347,21 @@ app.post("/api/connect", async (req, res) => {
       host: String(host),
       port: Number(port) || 22,
       username: String(username),
-      remoteDir: String(remoteDir)
+      remoteDir: String(remoteDir),
+      auth: req.body?.auth === "key" ? "key" : "password"
     };
+  }
+
+  // A saved profile decides how it signs in; the request cannot override that.
+  const useKey = target.auth === "key";
+  let privateKey = null;
+  if (useKey) {
+    privateKey = sshKey.privateKey();
+    if (!privateKey) {
+      return res.status(400).json({ error: "This server signs in with the app's SSH key, but no key exists yet. An administrator can create one under Settings." });
+    }
+  } else if (!password) {
+    return res.status(400).json({ error: "password is required." });
   }
 
   if (sftp) {
@@ -2369,7 +2387,7 @@ app.post("/api/connect", async (req, res) => {
         host: target.host,
         port: hostPort,
         username: target.username,
-        password,
+        ...(useKey ? { privateKey } : { password }),
         readyTimeout: 15000,
         // A PBX that stops answering is noticed within about 45 seconds rather than
         // at the next click, and idle sessions are kept alive through firewalls.
@@ -2381,6 +2399,9 @@ app.post("/api/connect", async (req, res) => {
       // ssh2 only says "verification failed"; the store knows what actually differed.
       if (hostKey.outcome.status === "mismatch") {
         throw hostKeys.mismatchError(target.host, hostPort, hostKey.outcome);
+      }
+      if (useKey && /authentication methods failed/i.test(error.message || "")) {
+        throw new Error(`${target.host} did not accept the app's SSH key for ${target.username}. Add the public key shown under Settings to that user's ~/.ssh/authorized_keys on the PBX.`);
       }
       throw error;
     }
@@ -2404,6 +2425,7 @@ app.post("/api/connect", async (req, res) => {
       resyncCommand: resolveResyncCommand(target.resyncCommand),
       statusCommand: resolveStatusCommand(target.statusCommand),
       defaultModel: normalizeModelChoice(target.defaultModel),
+      auth: useKey ? "key" : "password",
       hostKey: { fingerprint: hostKey.outcome.fingerprint, status: hostKey.outcome.status }
     };
     lastDisconnect = null;
@@ -2433,6 +2455,28 @@ app.post("/api/connect", async (req, res) => {
     }
 
     return res.status(500).json({ error: error.message || "Connection failed." });
+  }
+});
+
+// The app's SSH key. Everyone may see the public half (it is what gets installed on the
+// PBX); only administrators create or remove it. The private half never leaves the server.
+app.get("/api/ssh-key", (req, res) => {
+  res.json(sshKey.info());
+});
+
+app.post("/api/ssh-key", authGuard.requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, ...sshKey.generate({ replace: req.body?.replace === true }) });
+  } catch (error) {
+    res.status(409).json({ error: error.message });
+  }
+});
+
+app.delete("/api/ssh-key", authGuard.requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, removed: sshKey.remove() });
+  } catch (error) {
+    res.status(409).json({ error: error.message });
   }
 });
 

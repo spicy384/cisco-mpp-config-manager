@@ -11,7 +11,7 @@ The app has three pages, reached from the links in the header. Each has its own 
 |---|---|
 | **Configuration** | The phone list and editor, Bulk Edit, Add Phones from a List |
 | **Reporting** | Find in Configs, Drift Report, the Change Log, the Audit Log (administrators) |
-| **Settings** | PBX Servers, Users (administrators), Account |
+| **Settings** | PBX Servers, SSH Key, Users (administrators), Account |
 
 The bar under the header is on every page. It shows which PBX you are connected to, or a
 saved-server list and password box to connect with, and the latest status message.
@@ -22,6 +22,8 @@ saved-server list and password box to connect with, and the latest status messag
 - Administrator, user and read-only viewer roles; every write is attributed to the user who made it
 - An audit log of sign-ins, failed attempts, account changes and connections, for administrators
 - Can run behind an authentication reverse proxy instead (Authelia, Authentik, oauth2-proxy)
+- Optional SSH key sign-in to the PBX, so nobody types its password and dropped connections
+  come back by themselves
 - SSH host keys are remembered on first connection and checked every time after, so the
   PBX password is never sent to a host that is not the one you connected to before
 
@@ -492,6 +494,7 @@ The container logs which template it resolved at startup, so check `docker compo
 | `TRUST_PROXY_AUTH` | `false` | Accept a reverse proxy's authentication header (see above) |
 | `SNAPSHOT_KEEP` | `20` | Versions kept per config file for restore and rollback |
 | `AUDIT_KEEP` | `5000` | Entries kept in the audit log |
+| `SSH_KEY_FILE` | unset | Path to your own SSH private key, instead of one the app creates |
 | `TRUST_PROXY` | unset | Number of reverse proxies in front, so the audit log records client addresses |
 | `PROXY_USER_HEADER` | `remote-user` | Which header carries the username in that mode |
 
@@ -573,6 +576,44 @@ their password alone and enrol again. If the *only* administrator is locked out,
 container, edit `users.json` in the data directory, set `"mfaEnrolled": false` and
 `"totpSecret": null` on that account, and start it again.
 
+### Signing in to the PBX with a key
+By default the app signs in to a PBX with a password that someone types each time. It can
+use an SSH key instead:
+
+1. Under **Settings > SSH Key**, an administrator presses **Create Key**. The app makes an
+   ed25519 key pair and shows the public half.
+2. On the PBX, as the user the app connects as, add that line to `~/.ssh/authorized_keys`:
+
+   ```bash
+   mkdir -p ~/.ssh && chmod 700 ~/.ssh
+   echo 'ssh-ed25519 AAAA... pbx-mpp-config-manager' >> ~/.ssh/authorized_keys
+   chmod 600 ~/.ssh/authorized_keys
+   ```
+
+3. Under **Settings > PBX Servers**, set that server's *Sign in to the PBX with* to
+   *The app's SSH key* and save it.
+
+From then on the connection bar shows no password box for that server, and if its
+connection drops the app reconnects by itself.
+
+Things to weigh before turning it on:
+
+- **Anyone who can sign in to the app can connect to that PBX**, including read-only
+  viewers, because there is no longer a PBX password to know. Who may change things is
+  still decided by their role.
+- **The private key is in the data directory** (`ssh/id_ed25519`). Whoever holds a copy of
+  that volume or its backups can reach the PBX as that user, so protect them accordingly.
+- It is a good moment to stop using `root`: create a dedicated user on the PBX that can
+  write the provisioning directory and run the resync command (see *If resync does not
+  work*), and install the key for that user only.
+- **Replace Key** makes a new pair; every PBX refuses the app until the new public key is
+  installed. **Remove Key** deletes the app's copy but cannot remove it from any PBX: take
+  the line out of `authorized_keys` there.
+
+To use a key you already have, mount it into the container and set `SSH_KEY_FILE` to its
+path; the app then shows its public half and leaves creating and removing it to you. The
+host-key check described below applies to key sign-in exactly as it does to passwords.
+
 ### Audit log
 The Change Log records what was done to phone configs. The **Audit Log**, on the Reporting
 page and visible to administrators only, records what was done to the app itself:
@@ -584,7 +625,8 @@ page and visible to administrators only, records what was done to the app itself
 - server profiles and templates saved or deleted
 - connecting to and disconnecting from a PBX, connections that dropped on their own, and
   refused attempts such as a changed host key
-- a stored host key being forgotten, and the change log being cleared
+- a stored host key being forgotten, the SSH key being created, replaced or removed, and the
+  change log being cleared
 - anything a read-only account tried to do and was refused
 
 It can be filtered, narrowed to failures, and exported as CSV. It is kept in
@@ -787,7 +829,8 @@ To make your own the default, drop it at `data/default-template.xml` (that direc
 gitignored) or point `DEFAULT_TEMPLATE_PATH` at it. Either takes precedence over the example.
 
 ## Notes
-- **SFTP passwords are never persisted** - you type them at connect time. Only the profile
+- **SFTP passwords are never persisted** - you type them at connect time, or use an SSH key
+  and type nothing. Only the profile
   (host, port, username, remote directory, SIP server and resync command) is saved.
 - **Values are preserved exactly as written.** Leading zeros, trailing decimal zeros and
   the like survive unchanged, so an extension of `0903` stays `0903` rather than becoming

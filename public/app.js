@@ -488,7 +488,12 @@ function renderFileList(files) {
       li.classList.add("active");
     }
 
-    details.addEventListener("click", () => loadFile(file.name));
+    details.addEventListener("click", () => {
+      if (!confirmDiscardEdits(file.name === currentFile ? "reload this phone" : "open another phone")) {
+        return;
+      }
+      loadFile(file.name).catch((error) => setStatus(error.message, true));
+    });
     fileListEl.appendChild(li);
   }
 }
@@ -1122,7 +1127,7 @@ async function applyBulkEdit() {
       ? `delete tag "${request.key}"`
       : `set "${request.key}" to "${request.value}"`);
 
-  if (!confirm(`Write to the PBX now?\n\nThis will ${action} across ${fileCount} selected file${fileCount === 1 ? "" : "s"}.\n\nA copy of each file is kept first, so the batch can be rolled back afterwards.`)) {
+  if (!confirm(`Write to the PBX now?\n\nThis will ${action} across ${fileCount} selected file${fileCount === 1 ? "" : "s"}.\n\nA copy of each file is kept first, so the batch can be rolled back afterwards.${unsavedEditsWarning(request.fileNames.includes(currentFile))}`)) {
     setStatus("Bulk edit cancelled.");
     return;
   }
@@ -1439,6 +1444,7 @@ async function restoreVersion(fileName, versionId) {
   const ok = confirm(
     `Restore ${fileName} to the version from ${describeVersion(detail.version)}?\n\n${effect}\n\n`
       + "The current file is kept first, so this can be undone."
+      + unsavedEditsWarning(fileName === currentFile)
   );
   if (!ok) {
     setStatus("Restore cancelled.");
@@ -1484,6 +1490,7 @@ async function rollbackBatch() {
       + "the bulk edit was applied. Anything changed in those files since then is overwritten.\n\n"
       + "The current files are kept first, so each one can still be restored from History."
       + (bulkRollbackResyncInput.checked ? "\n\nEach rolled-back phone will then be told to fetch its configuration." : "")
+      + unsavedEditsWarning(job.results.some((item) => item.name === currentFile))
   );
   if (!ok) {
     setStatus("Roll back cancelled.");
@@ -1780,6 +1787,10 @@ async function createClone() {
   }
   if (!ext) {
     setStatus("Enter the new phone's line 1 extension.", true);
+    return;
+  }
+  // The clone is made from the file on the PBX, not from what is in the editor.
+  if (!confirmDiscardEdits("clone now (the clone copies the saved file, not these edits)")) {
     return;
   }
 
@@ -2119,6 +2130,9 @@ deleteServerBtn.addEventListener("click", async () => {
 });
 
 async function handleDisconnectClick() {
+  if (!confirmDiscardEdits("disconnect")) {
+    return;
+  }
   try {
     await disconnectFromServer();
     currentFile = "";
@@ -2594,8 +2608,47 @@ async function applyQuickChange(produced, description) {
 
 /** Whether the editor differs from what was last loaded or saved. */
 function editorIsDirty() {
-  return JSON.stringify(readEntries()) !== JSON.stringify(baseline.entries || []);
+  try {
+    return JSON.stringify(readEntries()) !== JSON.stringify(baseline.entries || []);
+  } catch {
+    // A row that cannot be read (bad attribute JSON) is certainly an unsaved edit.
+    return true;
+  }
 }
+
+/** The name to call the editor's contents by in a warning. */
+function editorSubject() {
+  return currentFile || fileNameInput.value.trim() || "the new phone";
+}
+
+/**
+ * Asks before an action throws away unsaved edits. True when there is nothing to
+ * lose or the user agreed; callers carry on only on true.
+ */
+function confirmDiscardEdits(action) {
+  if (!editorIsDirty()) {
+    return true;
+  }
+  return confirm(
+    `${editorSubject()} has unsaved changes.\n\n`
+      + `If you ${action}, they will be lost. Press Cancel to go back and Save / Upload first.`
+  );
+}
+
+/** Extra line for a confirm dialog whose action will reload the open phone. */
+function unsavedEditsWarning(affectsOpenFile) {
+  return affectsOpenFile && editorIsDirty()
+    ? `\n\nWARNING: ${editorSubject()} is open with unsaved changes, which will be discarded.`
+    : "";
+}
+
+// Closing or reloading the tab with unsaved edits asks first. Browsers show their own wording.
+window.addEventListener("beforeunload", (event) => {
+  if (currentUser && editorIsDirty()) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
+});
 
 /** The Quick tab's Save button says when there is something to write. */
 function refreshQuickDirty() {
@@ -2991,6 +3044,9 @@ document.getElementById("recovery-done").addEventListener("click", async () => {
 });
 
 logoutBtn.addEventListener("click", async () => {
+  if (!confirmDiscardEdits("sign out")) {
+    return;
+  }
   try {
     await api("/api/auth/logout", { method: "POST", body: "{}" });
   } catch {

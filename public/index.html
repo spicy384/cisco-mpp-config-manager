@@ -246,8 +246,34 @@
         <div class="panel-head">
           <h2>Editor</h2>
           <span id="editor-count" class="badge">No file loaded</span>
-          <button type="button" id="clone-btn" class="secondary small writer-only" hidden>Clone</button>
-          <button type="button" id="history-btn" class="secondary small" hidden>History</button>
+          <div class="panel-actions">
+            <button type="button" id="clone-btn" class="secondary small writer-only" hidden>Clone</button>
+            <button type="button" id="replace-btn" class="secondary small writer-only" title="The phone's hardware was swapped: keep the config, change the MAC" hidden>Replace</button>
+            <button type="button" id="delete-phone-btn" class="ghost-danger small writer-only" title="Remove this phone's config from the PBX" hidden>Delete</button>
+            <button type="button" id="history-btn" class="secondary small" hidden>History</button>
+          </div>
+        </div>
+
+        <div id="replace-panel" class="history-panel" hidden>
+          <div class="history-head">
+            <strong>Replace the hardware for <span id="replace-source-label"></span></strong>
+            <button type="button" id="replace-close-btn" class="secondary small">Close</button>
+          </div>
+          <p class="history-help">
+            For a phone that was swapped for a new unit. The config file is renamed to the new
+            phone's MAC, so the new unit picks up exactly the same settings; version history
+            and the phone model follow it. The old file name is removed from the PBX, with a
+            copy kept in the Change Log.
+          </p>
+          <div class="bulk-controls">
+            <label>New phone's MAC address or file name
+              <input id="replace-mac" placeholder="00:11:22:33:44:55" autocomplete="off" />
+            </label>
+          </div>
+          <p class="quick-preview">Will rename to: <code id="replace-file-preview">-</code></p>
+          <div class="actions">
+            <button type="button" id="replace-confirm-btn">Replace Phone</button>
+          </div>
         </div>
 
         <div id="clone-panel" class="history-panel" hidden>

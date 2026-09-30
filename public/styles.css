@@ -1605,6 +1605,14 @@ body.auth-locked .header-actions {
   }
 }
 
+/* Per-phone actions sit together at the end of the editor heading. */
+.panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
 .toasts {
   position: fixed;
   right: 16px;

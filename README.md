@@ -31,6 +31,8 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
   writer, so two people editing the same phone cannot silently overwrite each other
 - Create new config files from a template and upload them, or **clone** an existing phone:
   give it a MAC and an extension and everything else is copied
+- **Replace** a phone whose hardware was swapped (new MAC, same config and history) or
+  **delete** one that was retired; both can be undone from the change log
 
 **Bulk changes and history**
 - Find every phone whose config has a given tag or value - which phones still point at the old
@@ -171,6 +173,18 @@ password, so give the new phone its own. The short name on line 1 follows the ne
 or display name if it mirrored the old one. Keys that point at the source phone itself (a BLF
 to its own extension, say) are copied as they are; adjust those in the Quick editor if needed.
 The new file is logged as *Created ... cloned from ...* and opened in the editor.
+
+## Replacing and retiring a phone
+- **Replace** is for a phone that was swapped for a new unit. Open the phone, press
+  **Replace**, and enter the new unit's MAC. The config file is renamed on the PBX, so the
+  new phone picks up exactly the same settings; its version history and phone model follow
+  it. Nothing about the config itself changes.
+- **Delete** removes a phone's config file from the PBX, so the phone is no longer
+  provisioned.
+
+Neither is final. The removed file is kept as a version first, and **Restore** on its row
+in the Change Log recreates it exactly as it was. As with every write, the action is
+refused if that copy cannot be stored.
 
 ## Find in configs
 **Find in Configs** searches every phone config on the PBX for a tag, a value, or both, and

@@ -243,6 +243,12 @@ function setFileMetadataCacheEntry(key, value) {
   fileMetadataCache.set(key, value);
   persistFileMetadataCache();
 }
+
+function deleteFileMetadataCacheEntry(key) {
+  if (fileMetadataCache.delete(key)) {
+    persistFileMetadataCache();
+  }
+}
 /**
  * Change log is keyed by the same scope as the metadata cache, so a saved profile keeps
  * one history regardless of how many times you connect and disconnect.
@@ -884,8 +890,12 @@ async function restoreSnapshot(fileName, snapshotId, user = "") {
     extension: findLineExtension(restoredEntries) || ""
   });
 
-  const changes = diffEntriesForLog(previousEntries, restoredEntries);
-  const summary = changes.length === 0
+  // With no file on the PBX (it was deleted or replaced) this recreates it; a row per
+  // field would say nothing useful.
+  const changes = before ? diffEntriesForLog(previousEntries, restoredEntries) : [];
+  const summary = !before
+    ? `file recreated, ${restoredEntries.length} field${restoredEntries.length === 1 ? "" : "s"}`
+    : changes.length === 0
     ? "no field changes"
     : `${changes.length} field${changes.length === 1 ? "" : "s"}`;
 
@@ -912,6 +922,7 @@ async function restoreSnapshot(fileName, snapshotId, user = "") {
     ext: findLineExtension(restoredEntries),
     restored: { id: snapshot.id, ts: snapshot.ts },
     changes: changes.length,
+    recreated: !before,
     // The copy taken just now, i.e. what "undo this restore" would bring back.
     undoSnapshotId: before ? before.id : null
   };
@@ -2046,6 +2057,141 @@ app.put("/api/files/:name/model", authGuard.requireWriter, (req, res) => {
     res.json({ ok: true, fileName, model });
   } catch (error) {
     sendError(res, error);
+  }
+});
+
+// --- retire and replace ---------------------------------------------------------
+// Removes a phone's config from the PBX. The file is kept as a version first, so the
+// Restore button on its change-log row brings the phone back exactly as it was.
+app.delete("/api/files/:name", authGuard.requireWriter, async (req, res) => {
+  try {
+    ensureConnected();
+    if (bulkJobIsRunning()) {
+      return res.status(409).json({ error: "A bulk edit is running. Wait for it to finish." });
+    }
+
+    const fileName = sanitizeFileName(req.params.name);
+    const remotePath = path.posix.join(connection.remoteDir, fileName);
+    const scope = buildLogScope(connection);
+    const user = req.user ? req.user.username : "";
+
+    if (!(await sftp.exists(remotePath))) {
+      return res.status(404).json({ error: `File not found: ${fileName}` });
+    }
+
+    // Throws if the copy cannot be kept, in which case nothing is deleted.
+    const snapshot = await snapshotBeforeWrite(scope, fileName, remotePath, { user, reason: "delete" });
+    const entries = xmlToEntries(snapshot.xmlText).entries;
+    const station = findStationDisplayNameInEntries(entries);
+
+    await sftp.delete(remotePath);
+    deleteFileMetadataCacheEntry(buildCacheKey(fileName));
+
+    appendLogEntries(scope, [{
+      ts: Date.now(),
+      action: "delete",
+      file: fileName,
+      station,
+      tag: null,
+      before: `${entries.length} field${entries.length === 1 ? "" : "s"}`,
+      after: "Deleted from the PBX. Restore brings it back.",
+      status: "changed",
+      error: null,
+      snapshotId: snapshot.id
+    }], user);
+
+    return res.json({ ok: true, message: `Deleted ${fileName}`, fileName, station, snapshotId: snapshot.id });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+// A phone whose hardware was swapped: same config, new MAC, so a new file name. The
+// file is renamed on the PBX (keeping its ownership and permissions) and its history
+// and model follow it. A copy stays under the old name so that can be restored too.
+app.post("/api/files/:name/replace", authGuard.requireWriter, async (req, res) => {
+  try {
+    ensureConnected();
+    if (bulkJobIsRunning()) {
+      return res.status(409).json({ error: "A bulk edit is running. Wait for it to finish." });
+    }
+
+    const source = sanitizeFileName(req.params.name);
+    const fileName = sanitizeFileName(String(req.body?.fileName || ""));
+    if (!PHONE_FILE_PATTERN.test(fileName)) {
+      return res.status(400).json({ error: "The new file must be named spa<MAC>.xml so the phone can request it." });
+    }
+    if (fileName.toLowerCase() === source.toLowerCase()) {
+      return res.status(400).json({ error: "The new MAC is the same as the current one." });
+    }
+
+    const sourcePath = path.posix.join(connection.remoteDir, source);
+    const targetPath = path.posix.join(connection.remoteDir, fileName);
+    if (!(await sftp.exists(sourcePath))) {
+      return res.status(404).json({ error: `File not found: ${source}` });
+    }
+    if (await sftp.exists(targetPath)) {
+      return res.status(400).json({ error: `File already exists: ${fileName}` });
+    }
+
+    const scope = buildLogScope(connection);
+    const user = req.user ? req.user.username : "";
+    const content = await sftp.get(sourcePath);
+    const xmlText = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
+    const entries = xmlToEntries(xmlText).entries;
+    const station = findStationDisplayNameInEntries(entries);
+
+    await sftp.rename(sourcePath, targetPath);
+
+    // History and model follow the phone to its new name...
+    const movedVersions = snapshots.move(scope.key, source, fileName);
+    const model = getPhoneModel(source);
+    if (model) {
+      setPhoneModel(fileName, model);
+      setPhoneModel(source, null);
+    }
+    // ...and one copy is left under the old name, so that file can be put back.
+    const oldCopy = snapshots.capture({ scopeKey: scope.key, fileName: source, content: xmlText, user, reason: "replace", station });
+
+    deleteFileMetadataCacheEntry(buildCacheKey(source));
+    setFileMetadataCacheEntry(buildCacheKey(fileName), {
+      size: Buffer.byteLength(xmlText, "utf8"),
+      modified: Date.now(),
+      stationDisplayName: station,
+      extension: findLineExtension(entries) || ""
+    });
+
+    const ts = Date.now();
+    appendLogEntries(scope, [
+      {
+        ts,
+        action: "replace",
+        file: fileName,
+        station,
+        tag: null,
+        before: source,
+        after: `${fileName} (same config; ${movedVersions} earlier version${movedVersions === 1 ? "" : "s"} carried over)`,
+        status: "changed",
+        error: null,
+        snapshotId: null
+      },
+      {
+        ts,
+        action: "delete",
+        file: source,
+        station,
+        tag: null,
+        before: null,
+        after: `Removed: replaced by ${fileName}. Restore brings the old file back.`,
+        status: "changed",
+        error: null,
+        snapshotId: oldCopy.id
+      }
+    ], user);
+
+    return res.json({ ok: true, message: `Replaced ${source} with ${fileName}`, fileName, source, station, movedVersions });
+  } catch (error) {
+    return sendError(res, error);
   }
 });
 

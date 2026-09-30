@@ -79,6 +79,14 @@ const profileKemsLabel = document.getElementById("profile-kems-label");
 const profileKemsSelect = document.getElementById("profile-kems");
 const profileCustomLabel = document.getElementById("profile-custom-label");
 const profileCustomKeysInput = document.getElementById("profile-custom-keys");
+const replaceBtn = document.getElementById("replace-btn");
+const deletePhoneBtn = document.getElementById("delete-phone-btn");
+const replacePanel = document.getElementById("replace-panel");
+const replaceSourceLabel = document.getElementById("replace-source-label");
+const replaceCloseBtn = document.getElementById("replace-close-btn");
+const replaceMacInput = document.getElementById("replace-mac");
+const replaceFilePreview = document.getElementById("replace-file-preview");
+const replaceConfirmBtn = document.getElementById("replace-confirm-btn");
 const cloneBtn = document.getElementById("clone-btn");
 const clonePanel = document.getElementById("clone-panel");
 const cloneSourceLabel = document.getElementById("clone-source-label");
@@ -741,6 +749,9 @@ async function loadFile(name) {
   historyBtn.hidden = false;
   cloneBtn.hidden = false;
   clonePanel.hidden = true;
+  replaceBtn.hidden = false;
+  deletePhoneBtn.hidden = false;
+  replacePanel.hidden = true;
   if (!historyPanel.hidden) {
     await refreshHistory();
   }
@@ -1214,6 +1225,8 @@ async function applyBulkEdit() {
 }
 
 const LOG_ACTION_LABEL = {
+  delete: "Deleted phone",
+  replace: "Replaced phone",
   "bulk-set": "Bulk set",
   "bulk-delete": "Bulk delete",
   restore: "Restored version",
@@ -1388,7 +1401,9 @@ let lastAppliedJob = null;
 const SNAPSHOT_REASON_LABEL = {
   save: "before an editor save",
   bulk: "before a bulk edit",
-  restore: "before a restore"
+  restore: "before a restore",
+  delete: "before it was deleted",
+  replace: "before it was replaced"
 };
 
 // Mirrors the server's change-log redaction so a confirm dialog never shows a password.
@@ -1495,8 +1510,8 @@ async function restoreVersion(fileName, versionId) {
   }
 
   const ok = confirm(
-    `Restore ${fileName} to the version from ${describeVersion(detail.version)}?\n\n${effect}\n\n`
-      + "The current file is kept first, so this can be undone."
+    `Restore ${fileName} to the version from ${describeVersion(detail.version)}?\n\n${effect}`
+      + (detail.currentExists ? "\n\nThe current file is kept first, so this can be undone." : "")
       + unsavedEditsWarning(fileName === currentFile)
   );
   if (!ok) {
@@ -1509,7 +1524,9 @@ async function restoreVersion(fileName, versionId) {
     body: JSON.stringify({ snapshotId: versionId })
   });
 
-  setStatus(`${result.message || `Restored ${fileName}`} (${result.changes} field${result.changes === 1 ? "" : "s"} changed).`);
+  setStatus(result.recreated
+    ? `${result.message || `Restored ${fileName}`} (the file was recreated on the PBX).`
+    : `${result.message || `Restored ${fileName}`} (${result.changes} field${result.changes === 1 ? "" : "s"} changed).`);
 
   await refreshFiles();
   await refreshLogScopes();
@@ -1827,6 +1844,7 @@ function openClonePanel() {
   cloneStationInput.value = "";
   updateClonePreview();
   historyPanel.hidden = true;
+  replacePanel.hidden = true;
   clonePanel.hidden = false;
   cloneMacInput.focus();
 }
@@ -1882,6 +1900,129 @@ for (const input of [cloneMacInput, cloneExtInput, cloneDisplayInput, clonePassw
     }
   });
 }
+
+// --- replace and retire --------------------------------------------------------------------
+
+/** Empties the editor after the open phone has gone away; the list and selections stay. */
+function closeOpenPhone() {
+  currentFile = "";
+  currentFileVersion = null;
+  fileNameInput.value = "";
+  historyBtn.hidden = true;
+  historyPanel.hidden = true;
+  cloneBtn.hidden = true;
+  clonePanel.hidden = true;
+  replaceBtn.hidden = true;
+  deletePhoneBtn.hidden = true;
+  replacePanel.hidden = true;
+  clearRows();
+  setBaseline("flat-profile", []);
+  refreshQuickDirty();
+  if (quickSchemaData) {
+    renderQuickButtons();
+    renderQuickSettings();
+  }
+  updateQuickScopeHints();
+}
+
+function updateReplacePreview() {
+  const name = cloneFileNameFromInput(replaceMacInput.value);
+  replaceFilePreview.textContent = name || (replaceMacInput.value.trim() ? "(enter a 12-digit MAC or a file name ending in .xml)" : "-");
+}
+
+function openReplacePanel() {
+  if (!currentFile) {
+    setStatus("Open the phone that was replaced first.", true);
+    return;
+  }
+  replaceSourceLabel.textContent = currentStationLabel();
+  replaceMacInput.value = "";
+  updateReplacePreview();
+  historyPanel.hidden = true;
+  clonePanel.hidden = true;
+  replacePanel.hidden = false;
+  replaceMacInput.focus();
+}
+
+/** "Front Desk - 7001 (spa001.xml)" for the open phone, as last loaded or saved. */
+function currentStationLabel() {
+  const station = (baseline.entries || []).find((e) => e.key === "Station_Display_Name")?.value;
+  return station ? `${station} (${currentFile})` : currentFile;
+}
+
+async function replacePhone() {
+  const fileName = cloneFileNameFromInput(replaceMacInput.value);
+  if (!fileName) {
+    setStatus("Enter the new phone's MAC address (12 hex digits) or a file name ending in .xml.", true);
+    return;
+  }
+  // The file is renamed as it is on the PBX; edits in the editor are not part of it.
+  if (!confirmDiscardEdits("replace now (the rename uses the saved file, not these edits)")) {
+    return;
+  }
+  const source = currentFile;
+  if (!confirm(
+    `Replace the hardware for ${currentStationLabel()}?\n\n`
+      + `${source} will be renamed to ${fileName}, so the new phone gets the same config. `
+      + `The old phone will no longer be provisioned.\n\n`
+      + "A copy of the old file is kept in the Change Log."
+  )) {
+    setStatus("Replace cancelled.");
+    return;
+  }
+
+  const result = await api(`/api/files/${encodeURIComponent(source)}/replace`, {
+    method: "POST",
+    body: JSON.stringify({ fileName })
+  });
+
+  replacePanel.hidden = true;
+  await refreshFiles();
+  await refreshLogScopes();
+  await loadFile(result.fileName);
+  setStatus(`${result.message}. Plug in the new phone and it will pick up this config.`);
+}
+
+async function deleteOpenPhone() {
+  if (!currentFile) {
+    setStatus("Open the phone to delete first.", true);
+    return;
+  }
+  const fileName = currentFile;
+  if (!confirm(
+    `Delete ${currentStationLabel()}?\n\n`
+      + "Its config file is removed from the PBX, so the phone will no longer be provisioned. "
+      + "A copy is kept: Restore on its row in the Change Log brings it back."
+      + unsavedEditsWarning(true)
+  )) {
+    setStatus("Delete cancelled.");
+    return;
+  }
+
+  const result = await api(`/api/files/${encodeURIComponent(fileName)}`, { method: "DELETE" });
+  closeOpenPhone();
+  await refreshFiles();
+  await refreshLogScopes();
+  setStatus(`${result.message}. Restore it from the Change Log if that was a mistake.`);
+}
+
+replaceBtn.addEventListener("click", openReplacePanel);
+replaceCloseBtn.addEventListener("click", () => {
+  replacePanel.hidden = true;
+});
+replaceMacInput.addEventListener("input", updateReplacePreview);
+replaceMacInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    replacePhone().catch((error) => setStatus(error.message, true));
+  }
+});
+replaceConfirmBtn.addEventListener("click", () => {
+  replacePhone().catch((error) => setStatus(error.message, true));
+});
+deletePhoneBtn.addEventListener("click", () => {
+  deleteOpenPhone().catch((error) => setStatus(error.message, true));
+});
 
 // --- find in all configs ------------------------------------------------------------
 
@@ -2223,6 +2364,9 @@ function clearWorkspace() {
   historyPanel.hidden = true;
   cloneBtn.hidden = true;
   clonePanel.hidden = true;
+  replaceBtn.hidden = true;
+  deletePhoneBtn.hidden = true;
+  replacePanel.hidden = true;
   connectedScopeKey = null;
   bulkRollbackBtn.hidden = true;
   bulkRollbackResyncLabel.hidden = true;

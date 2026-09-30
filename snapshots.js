@@ -124,7 +124,46 @@ function createSnapshotStore({ dataDir, keep = DEFAULT_KEEP }) {
     }
   }
 
-  return { root, keep: limit, capture, list, read };
+  /**
+   * Carries a file's history over to a new name, for a phone whose hardware (and so
+   * its MAC-named config file) was replaced. History already under the new name is
+   * merged in date order, pruned to the usual limit.
+   */
+  function move(scopeKey, fromName, toName) {
+    const fromDir = fileDir(scopeKey, fromName);
+    const toDir = fileDir(scopeKey, toName);
+    const moving = readIndex(fromDir);
+    if (moving.length === 0) {
+      return 0;
+    }
+
+    fs.mkdirSync(toDir, { recursive: true });
+    const moved = [];
+    for (const entry of moving) {
+      try {
+        fs.renameSync(path.join(fromDir, `${entry.id}.xml`), path.join(toDir, `${entry.id}.xml`));
+        moved.push(entry);
+      } catch {
+        // A version whose content is already gone is dropped from the history.
+      }
+    }
+
+    const merged = [...readIndex(toDir), ...moved].sort((a, b) => a.ts - b.ts);
+    const dropped = merged.splice(0, Math.max(0, merged.length - limit));
+    writeIndex(toDir, merged);
+    for (const old of dropped) {
+      try {
+        fs.unlinkSync(path.join(toDir, `${old.id}.xml`));
+      } catch {
+        // Already gone.
+      }
+    }
+
+    fs.rmSync(fromDir, { recursive: true, force: true });
+    return moved.length;
+  }
+
+  return { root, keep: limit, capture, list, read, move };
 }
 
 module.exports = { createSnapshotStore, scopeDirName, DEFAULT_KEEP };

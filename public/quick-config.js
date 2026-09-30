@@ -369,6 +369,18 @@
       read: (get) => get("Primary_NTP_Server")
     },
     {
+      id: "firmware",
+      label: "Firmware upgrade rule",
+      hint: "URL of the firmware load this phone should run. The phone upgrades when it next resyncs or restarts.",
+      placeholder: "http://pbx.example.com/firmware/sip88xx.11-3-7MPP0001-272.loads",
+      // Upgrade_Rule is ignored unless upgrades are enabled, so both are written.
+      build: (v) => [
+        { key: "Upgrade_Enable", value: "Yes", attributes: { ua: "na" } },
+        { key: "Upgrade_Rule", value: v, attributes: { ua: "na" } }
+      ],
+      read: (get) => get("Upgrade_Rule")
+    },
+    {
       id: "admin-password",
       label: "Admin password",
       hint: "Protects the phone's own web interface and settings menu.",

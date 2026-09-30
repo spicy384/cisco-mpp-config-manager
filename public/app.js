@@ -1057,14 +1057,30 @@ function renderBulkResults(data) {
     statusTd.textContent = item.error || (item.status === "changed" ? changedLabel : BULK_STATUS_LABEL[item.status] || item.status);
     tr.appendChild(statusTd);
 
-    const beforeTd = document.createElement("td");
-    beforeTd.textContent = (item.previousValues || []).join(", ");
-    tr.appendChild(beforeTd);
+    // A Quick action writes several tags at once: list each one rather than leaving
+    // the value columns blank.
+    const multi = (item.changes || []).length > 1 && data.mode !== "rollback";
+    const shown = (tag, value, missing) => {
+      if (value == null || value === "") return missing;
+      return SENSITIVE_TAG_RE.test(tag) ? "(hidden)" : value;
+    };
 
+    const beforeTd = document.createElement("td");
     const afterTd = document.createElement("td");
-    if (item.status === "changed") {
-      afterTd.textContent = data.mode === "delete" ? "(tag removed)" : String(item.newValue ?? "");
+    if (multi) {
+      beforeTd.className = "multi-value";
+      afterTd.className = "multi-value";
+      beforeTd.textContent = item.changes.map((c) => `${c.tag}: ${shown(c.tag, c.before, "(not set)")}`).join("\n");
+      if (item.status === "changed") {
+        afterTd.textContent = item.changes.map((c) => `${c.tag}: ${shown(c.tag, c.after, "(empty)")}`).join("\n");
+      }
+    } else {
+      beforeTd.textContent = (item.previousValues || []).join(", ");
+      if (item.status === "changed") {
+        afterTd.textContent = data.mode === "delete" ? "(tag removed)" : String(item.newValue ?? "");
+      }
     }
+    tr.appendChild(beforeTd);
     tr.appendChild(afterTd);
 
     if (data.resync) {

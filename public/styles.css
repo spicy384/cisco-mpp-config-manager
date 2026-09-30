@@ -1605,6 +1605,11 @@ body.auth-locked .header-actions {
   }
 }
 
+.bulk-results td.multi-value {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
 .history-diff {
   margin-top: 12px;
   padding-top: 12px;

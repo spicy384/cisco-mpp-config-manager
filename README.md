@@ -123,6 +123,7 @@ documentation and marked *unverified* in the list. If one is wrong for your phon
 | Voicemail number | `Voice_Mail_Number` |
 | Time zone | `Time_Zone` |
 | NTP server | `Primary_NTP_Server` |
+| Firmware upgrade rule | `Upgrade_Enable` = `Yes` and `Upgrade_Rule` |
 | Admin password | `Admin_Passwd` (`ua="rw"`) |
 | Wallpaper | `Phone_Background` = `Download Picture` and `Picture_Download_URL` |
 
@@ -131,6 +132,22 @@ documentation and marked *unverified* in the list. If one is wrong for your phon
 > path, so the change log, History and Reset behave exactly as they do for a manual edit.
 > For the selected phones, each field has **Preview on selected phones**, which goes
 > through Bulk Edit's preview-then-confirm flow.
+
+### Rolling out firmware
+The **Firmware upgrade rule** setting turns a firmware push into an ordinary bulk change:
+
+1. Put the firmware load where the phones can fetch it, and tick the phones to upgrade in
+   the XML Files list. Loads are per model family (88xx, 78xx, 68xx), so do one family at
+   a time.
+2. On the Quick tab choose **the selected phones**, enter the load's URL under *Firmware
+   upgrade rule* and press **Preview on selected phones**.
+3. Review the preview, tick **Resync changed phones after applying**, and **Apply to PBX**.
+
+Each phone fetches its config on the resync, sees the new rule and upgrades; the
+registration dots show it drop off and come back. Anything Cisco's rule syntax allows can
+be entered, including a condition such as
+`( $SWVER ne 11.3.7 )? http://pbx/firmware/sip88xx.11-3-7MPP0001-272.loads`. As with any
+bulk change, **Roll Back This Batch** puts the previous rule back.
 
 ## Bulk Edit
 Change a single setting across all (or selected) phone configs without opening each file.

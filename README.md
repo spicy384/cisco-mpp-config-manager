@@ -263,7 +263,9 @@ Before the app overwrites a config file - an editor save, a bulk apply, a Quick 
 it stores the file exactly as it was. That makes every change undoable:
 
 - **History** in the editor lists the kept versions of the open file (when, why it was
-  kept, by whom, phone name, size) with a **Restore** button on each.
+  kept, by whom, phone name, size) with **Compare** and **Restore** on each. Compare shows,
+  field by field, how that version differs from the file on the PBX now and changes nothing;
+  viewers can use it too.
 - **Restore** in the change log puts the file back as it was *before that row's change*.
 - **Roll Back This Batch** appears after a bulk apply and restores every file the batch
   changed, with the same progress bar as the apply. Its **Resync rolled-back phones** tick

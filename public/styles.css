@@ -1605,6 +1605,24 @@ body.auth-locked .header-actions {
   }
 }
 
+.history-diff {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.history-diff .history-head {
+  margin-bottom: 8px;
+}
+
+.history-diff .history-head button {
+  margin-left: auto;
+}
+
+.bulk-results tr.is-compared td {
+  background: color-mix(in srgb, var(--success) 8%, transparent);
+}
+
 /* Per-phone actions sit together at the end of the editor heading. */
 .panel-actions {
   display: flex;

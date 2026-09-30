@@ -58,6 +58,10 @@ const historyPanel = document.getElementById("history-panel");
 const historyMetaEl = document.getElementById("history-meta");
 const historyListEl = document.getElementById("history-list");
 const historyCloseBtn = document.getElementById("history-close-btn");
+const historyDiffEl = document.getElementById("history-diff");
+const historyDiffTitle = document.getElementById("history-diff-title");
+const historyDiffBody = document.getElementById("history-diff-body");
+const historyDiffCloseBtn = document.getElementById("history-diff-close-btn");
 const resyncCommandInput = document.getElementById("resync-command");
 const resyncTestExtInput = document.getElementById("resync-test-ext");
 const resyncTestBtn = document.getElementById("resync-test-btn");
@@ -1427,6 +1431,7 @@ async function refreshHistory() {
 
 function renderHistory(data) {
   historyListEl.replaceChildren();
+  historyDiffEl.hidden = true;
   const versions = data.versions || [];
   historyMetaEl.textContent = `${versions.length} of up to ${data.keep} kept for ${data.fileName}`;
 
@@ -1467,6 +1472,20 @@ function renderHistory(data) {
 
     const actionTd = document.createElement("td");
     actionTd.className = "restore-cell";
+    const wrap = document.createElement("div");
+    wrap.className = "row-actions";
+
+    // Looking is for everyone; only restoring needs write access.
+    const compareBtn = document.createElement("button");
+    compareBtn.type = "button";
+    compareBtn.className = "secondary small";
+    compareBtn.textContent = "Compare";
+    compareBtn.title = "Show how this version differs from the file on the PBX now";
+    compareBtn.addEventListener("click", () => {
+      compareVersion(data.fileName, version, tr).catch((error) => setStatus(error.message, true));
+    });
+    wrap.appendChild(compareBtn);
+
     if (canWrite()) {
       const btn = document.createElement("button");
       btn.type = "button";
@@ -1475,8 +1494,9 @@ function renderHistory(data) {
       btn.addEventListener("click", () => {
         restoreVersion(data.fileName, version.id).catch((error) => setStatus(error.message, true));
       });
-      actionTd.appendChild(btn);
+      wrap.appendChild(btn);
     }
+    actionTd.appendChild(wrap);
     tr.appendChild(actionTd);
 
     tbody.appendChild(tr);
@@ -1485,6 +1505,71 @@ function renderHistory(data) {
   table.appendChild(tbody);
   historyListEl.appendChild(table);
 }
+
+/** Read-only: how one kept version differs from the file as it is on the PBX now. */
+async function compareVersion(fileName, version, row) {
+  const detail = await api(`/api/files/${encodeURIComponent(fileName)}/history/${encodeURIComponent(version.id)}`);
+  const diff = detail.diff || [];
+
+  for (const tr of historyListEl.querySelectorAll("tr.is-compared")) {
+    tr.classList.remove("is-compared");
+  }
+  if (row) {
+    row.classList.add("is-compared");
+  }
+
+  historyDiffBody.replaceChildren();
+  historyDiffTitle.textContent = `Version from ${describeVersion(detail.version)} compared with the PBX now`;
+
+  const note = document.createElement("p");
+  note.className = "empty-state";
+  if (!detail.currentExists) {
+    note.textContent = `${fileName} no longer exists on the PBX. Restoring this version would recreate it with ${(detail.entries || []).length} fields.`;
+    historyDiffBody.appendChild(note);
+  } else if (diff.length === 0) {
+    note.textContent = "No differences: the file on the PBX matches this version field for field.";
+    historyDiffBody.appendChild(note);
+  } else {
+    const table = document.createElement("table");
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    for (const label of ["Tag", "In this version", "On the PBX now"]) {
+      const th = document.createElement("th");
+      th.textContent = label;
+      headRow.appendChild(th);
+    }
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+    for (const change of diff) {
+      // change.before is the PBX now, change.after is this version.
+      const hide = SENSITIVE_TAG_RE.test(change.key);
+      const show = (value, missing) => (value == null ? missing : (hide && value !== "" ? "(hidden)" : (value === "" ? "(empty)" : value)));
+      const tr = document.createElement("tr");
+      for (const text of [change.key, show(change.after, "(not in this version)"), show(change.before, "(not on the PBX)")]) {
+        const td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    historyDiffBody.appendChild(table);
+  }
+
+  historyDiffEl.hidden = false;
+  setStatus(detail.currentExists
+    ? `${diff.length} field${diff.length === 1 ? "" : "s"} differ${diff.length === 1 ? "s" : ""} between this version and the PBX.`
+    : `${fileName} is not on the PBX; this version would recreate it.`);
+}
+
+historyDiffCloseBtn.addEventListener("click", () => {
+  historyDiffEl.hidden = true;
+  for (const tr of historyListEl.querySelectorAll("tr.is-compared")) {
+    tr.classList.remove("is-compared");
+  }
+});
 
 /** Shows exactly what would change, then writes the stored version back to the PBX. */
 async function restoreVersion(fileName, versionId) {

@@ -2708,6 +2708,12 @@ app.get("/api/files", async (req, res) => {
       });
     }
 
+    // The phone model each file is recorded as, for listings that show it.
+    const models = loadPhoneModels();
+    for (const file of files) {
+      file.model = normalizeModelChoice(models[buildCacheKey(file.name)]);
+    }
+
     res.json({ files });
   } catch (error) {
     sendError(res, error);

@@ -14,6 +14,11 @@ const sshKeyFingerprintEl = document.getElementById("sshkey-fingerprint");
 const sshKeyCopyBtn = document.getElementById("sshkey-copy-btn");
 const sshKeyGenerateBtn = document.getElementById("sshkey-generate-btn");
 const sshKeyRemoveBtn = document.getElementById("sshkey-remove-btn");
+const phonesMetaEl = document.getElementById("phones-meta");
+const phonesSearchInput = document.getElementById("phones-search");
+const phonesRefreshBtn = document.getElementById("phones-refresh-btn");
+const phonesExportBtn = document.getElementById("phones-export-btn");
+const phonesResultsEl = document.getElementById("phones-results");
 const auditPanel = document.getElementById("audit-panel");
 const auditMetaEl = document.getElementById("audit-meta");
 const auditSearchInput = document.getElementById("audit-search");
@@ -736,6 +741,7 @@ async function refreshFiles() {
 
     renderFileList(getFilteredFiles());
     onSelectionChanged();
+    renderPhoneReport();
   } finally {
     setFilesLoading(false);
   }
@@ -795,6 +801,7 @@ async function refreshRegistrations(force = false) {
   }
 
   renderFileList(getFilteredFiles());
+  renderPhoneReport();
 }
 
 // Keep the dots and the list of connected PBXs fresh while someone is looking at the page.
@@ -813,6 +820,190 @@ setInterval(() => {
     }
   }).catch(() => {});
 }, REGISTRATION_POLL_MS);
+
+// --- phone report ---------------------------------------------------------------------------------
+
+/** "spa001122aabbcc.xml" -> "00:11:22:AA:BB:CC"; anything else is shown as the file name. */
+function macFromFileName(name) {
+  const m = /^spa([0-9a-f]{12}).xml$/i.exec(String(name || ""));
+  return m ? m[1].toUpperCase().match(/.{2}/g).join(":") : name;
+}
+
+/** Everything known about each phone, joined from the list, registration status and the log. */
+function phoneReportRows() {
+  const lastChange = new Map();
+  // The change log holds one server at a time; use it only when it is this one's.
+  if (connectedScopeKey && logScopeSelect.value === connectedScopeKey) {
+    for (const entry of logEntries) {
+      if (entry.file && entry.status !== "error" && (lastChange.get(entry.file) || 0) < entry.ts) {
+        lastChange.set(entry.file, entry.ts);
+      }
+    }
+  }
+
+  return allFiles.map((file) => {
+    const reg = registrations?.files?.[file.name] || null;
+    const model = file.model || lastConnectionInfo?.defaultModel || null;
+    return {
+      name: file.name,
+      mac: macFromFileName(file.name),
+      station: file.stationDisplayName || "",
+      extension: file.extension || "",
+      model: QuickConfig.describeModelChoice(model || { model: quickSchemaData?.defaultModel || "8841" }).replace(/:.*$/, ""),
+      modelSet: Boolean(file.model),
+      status: file.extension ? (reg ? reg.status : "unknown") : "no-line",
+      statusLabel: file.extension ? (reg ? REG_LABEL[reg.status] || reg.status : "Not checked") : "No line 1",
+      address: reg && reg.ip ? `${reg.ip}${reg.port ? `:${reg.port}` : ""}` : "",
+      rtt: reg && reg.rtt !== null && reg.rtt !== undefined ? reg.rtt : null,
+      size: file.size || 0,
+      lastChange: lastChange.get(file.name) || null
+    };
+  }).sort((a, b) => (a.station || a.name).localeCompare(b.station || b.name));
+}
+
+function filteredPhoneReport() {
+  const q = phonesSearchInput.value.trim().toLowerCase();
+  const rows = phoneReportRows();
+  if (!q) {
+    return rows;
+  }
+  return rows.filter((row) => [row.station, row.name, row.mac, row.extension, row.model, row.statusLabel, row.address]
+    .some((value) => String(value ?? "").toLowerCase().includes(q)));
+}
+
+function renderPhoneReport() {
+  phonesResultsEl.replaceChildren();
+  if (!lastConnectionInfo) {
+    phonesMetaEl.textContent = "Not connected";
+    return;
+  }
+
+  const rows = filteredPhoneReport();
+  const all = phoneReportRows();
+  const online = all.filter((r) => r.status === "online").length;
+  const withLine = all.filter((r) => r.status !== "no-line").length;
+  phonesMetaEl.textContent = `${rows.length === all.length ? all.length : `${rows.length} of ${all.length}`} phone${all.length === 1 ? "" : "s"}, ${online} of ${withLine} registered`;
+
+  if (rows.length === 0) {
+    const p = document.createElement("p");
+    p.className = "empty-state";
+    p.textContent = all.length ? "No phones match the filter." : "No phone configs on this PBX yet.";
+    phonesResultsEl.appendChild(p);
+    return;
+  }
+
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["Phone", "MAC address", "Ext.", "Model", "Status", "Address", "RTT", "Size", "Last change", ""]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    if (row.name === currentFile) {
+      tr.classList.add("is-compared");
+    }
+
+    const stationTd = document.createElement("td");
+    const dot = document.createElement("span");
+    dot.className = `reg-dot reg-${row.status === "no-line" || row.status === "unknown" ? "none" : row.status}`;
+    stationTd.appendChild(dot);
+    stationTd.appendChild(document.createTextNode(row.station || "(no name)"));
+    tr.appendChild(stationTd);
+
+    const macTd = document.createElement("td");
+    macTd.textContent = row.mac;
+    macTd.title = row.name;
+    macTd.className = "mono-cell";
+    tr.appendChild(macTd);
+
+    for (const text of [
+      row.extension || "-",
+      row.model + (row.modelSet ? "" : " (default)"),
+      row.statusLabel,
+      row.address || "-",
+      row.rtt === null ? "-" : `${row.rtt} ms`,
+      `${row.size.toLocaleString()} B`,
+      row.lastChange ? formatTimestamp(row.lastChange) : "-"
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+
+    const actionTd = document.createElement("td");
+    actionTd.className = "restore-cell";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "secondary small";
+    btn.textContent = row.name === currentFile ? "Open in editor" : "Configure";
+    btn.addEventListener("click", () => {
+      openPhoneInEditor(row.name).catch((error) => setStatus(error.message, true));
+    });
+    actionTd.appendChild(btn);
+    tr.appendChild(actionTd);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  phonesResultsEl.appendChild(table);
+}
+
+/** From any page: the Configuration page with this phone open. */
+async function openPhoneInEditor(name) {
+  if (name !== currentFile && !confirmDiscardEdits("open another phone")) {
+    return;
+  }
+  showPage("configuration");
+  if (name !== currentFile) {
+    await loadFile(name);
+  }
+  document.querySelector(".col-editor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function exportPhonesCsv() {
+  const rows = filteredPhoneReport();
+  if (rows.length === 0) {
+    setStatus("Nothing to export.", true);
+    return;
+  }
+  const cell = (v) => {
+    const s = String(v ?? "");
+    const safe = /^[=+\-@]/.test(s) ? `'${s}` : s;
+    return `"${safe.replace(/"/g, '""')}"`;
+  };
+  const lines = [["Phone", "MAC address", "File", "Extension", "Model", "Status", "Address", "RTT ms", "Size bytes", "Last change"].map(cell).join(",")];
+  for (const row of rows) {
+    lines.push([row.station, row.mac, row.name, row.extension, row.model, row.statusLabel, row.address, row.rtt ?? "", row.size, row.lastChange ? formatTimestamp(row.lastChange) : ""].map(cell).join(","));
+  }
+  const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `pbx-phones-${(lastConnectionInfo?.profileName || lastConnectionInfo?.host || "pbx").replace(/[^\w.-]+/g, "_")}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  setStatus(`Exported ${rows.length} phone${rows.length === 1 ? "" : "s"}.`);
+}
+
+phonesSearchInput.addEventListener("input", renderPhoneReport);
+phonesRefreshBtn.addEventListener("click", async () => {
+  try {
+    await refreshFiles();
+    await refreshRegistrations(true);
+    setStatus("Phone list refreshed");
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+phonesExportBtn.addEventListener("click", exportPhonesCsv);
 
 // --- several PBXs at once ----------------------------------------------------------------------
 
@@ -1476,6 +1667,7 @@ async function loadLogEntries() {
   const data = await api(`/api/logs/${encodeURIComponent(key)}`);
   logEntries = data.entries || [];
   renderLogEntries();
+  renderPhoneReport();
 }
 
 function getFilteredLogEntries() {
@@ -3040,6 +3232,7 @@ function clearWorkspace() {
   allFiles = [];
   selectedFiles.clear();
   onSelectionChanged();
+  renderPhoneReport();
 }
 
 // Which PBX the open phone, list and selections belong to, in the server's own terms.
@@ -3075,6 +3268,7 @@ function handleConnectionLost(data) {
   const message = editorIsDirty()
     ? `${base} Your unsaved edits are still in the editor.`
     : base;
+  renderPhoneReport();
   setStatus(message, true);
   if (data.lastDisconnect?.profileId && servers.some((s) => s.id === data.lastDisconnect.profileId)) {
     quickServerSelect.value = data.lastDisconnect.profileId;

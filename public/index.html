@@ -529,6 +529,27 @@
     </div>
 
     <div class="page" id="page-reporting" data-page="reporting" aria-label="Reporting" hidden>
+    <section class="panel" id="phones-panel">
+      <div class="panel-head">
+        <h2>Phones</h2>
+        <span id="phones-meta" class="badge">Not connected</span>
+      </div>
+      <p class="bulk-hint">
+        Every phone on the connected PBX at a glance: whether it is registered and from where,
+        what it is, and when it was last changed. <strong>Configure</strong> opens it in the editor.
+      </p>
+
+      <div class="log-controls">
+        <label>Filter
+          <input id="phones-search" placeholder="Search name, file, extension, address or status" />
+        </label>
+        <button id="phones-refresh-btn" type="button" class="secondary">Refresh</button>
+        <button id="phones-export-btn" type="button" class="secondary">Export CSV</button>
+      </div>
+
+      <div id="phones-results" class="bulk-results"></div>
+    </section>
+
     <section class="panel" id="find-panel">
       <div class="panel-head">
         <h2>Find in Configs</h2>

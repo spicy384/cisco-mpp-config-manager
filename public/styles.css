@@ -672,6 +672,16 @@ button.is-staged {
   background: #d97706;
 }
 
+.bulk-results td.mono-cell {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.reg-dot.reg-none {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+}
+
 .reg-dot.reg-unknown {
   background: var(--text-muted);
 }

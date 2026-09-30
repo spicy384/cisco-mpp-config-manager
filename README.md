@@ -10,7 +10,7 @@ The app has three pages, reached from the links in the header. Each has its own 
 | Page | What is on it |
 |---|---|
 | **Configuration** | The phone list and editor, Bulk Edit, Add Phones from a List |
-| **Reporting** | Find in Configs, Drift Report, the Change Log, the Audit Log (administrators) |
+| **Reporting** | Phones, Find in Configs, Drift Report, the Change Log, the Audit Log (administrators) |
 | **Settings** | PBX Servers, SSH Key, Users (administrators), Account |
 
 The bar under the header is on every page. It shows which PBX you are working on, or a
@@ -273,6 +273,12 @@ different `ua` attribute. Password values show as `(hidden)`.
 Neither is final. The removed file is kept as a version first, and **Restore** on its row
 in the Change Log recreates it exactly as it was. As with every write, the action is
 refused if that copy cannot be stored.
+
+## Phones
+The **Phones** panel on the Reporting page lists every phone on the connected PBX with its
+name, MAC address, line 1 extension, model, registration status, the address it registered from
+and its round-trip time, config size, and when it was last changed through this app. It can
+be filtered and exported as CSV, and **Configure** opens the phone in the editor.
 
 ## Find in configs
 **Find in Configs** searches every phone config on the PBX for a tag, a value, or both, and

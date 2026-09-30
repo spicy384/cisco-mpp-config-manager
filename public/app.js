@@ -21,6 +21,8 @@ const auditFailuresOnly = document.getElementById("audit-failures-only");
 const auditRefreshBtn = document.getElementById("audit-refresh-btn");
 const auditExportBtn = document.getElementById("audit-export-btn");
 const auditResultsEl = document.getElementById("audit-results");
+const pbxSwitchSelect = document.getElementById("pbx-switch");
+const liveLinksEl = document.getElementById("live-links");
 const quickConnectForm = document.getElementById("quick-connect-form");
 const quickServerSelect = document.getElementById("quick-server");
 const quickPasswordInput = document.getElementById("quick-password");
@@ -795,12 +797,99 @@ async function refreshRegistrations(force = false) {
   renderFileList(getFilteredFiles());
 }
 
-// Keep the dots fresh while someone is looking at the page.
+// Keep the dots and the list of connected PBXs fresh while someone is looking at the page.
 setInterval(() => {
-  if (lastConnectionInfo && document.visibilityState === "visible") {
+  if (!currentUser || document.visibilityState !== "visible") {
+    return;
+  }
+  if (lastConnectionInfo) {
     refreshRegistrations().catch(() => {});
   }
+  api("/api/status").then((data) => {
+    applyConnections(data.connections);
+    if (lastConnectionInfo && !data.connected) {
+      // Closed by someone else, or its profile was deleted: same as a dropped line.
+      handleConnectionLost({ error: data.lostMessage || "The connection to the PBX was closed. Reconnect to continue.", lastDisconnect: data.lastDisconnect });
+    }
+  }).catch(() => {});
 }, REGISTRATION_POLL_MS);
+
+// --- several PBXs at once ----------------------------------------------------------------------
+
+let liveConnections = [];
+
+/** Shows the other connected PBXs: a switcher when on one, join buttons when on none. */
+function applyConnections(list) {
+  if (!Array.isArray(list)) {
+    return;
+  }
+  liveConnections = list;
+  const currentKey = connectionKeyOf(lastConnectionInfo);
+
+  // In the bar while connected: a select, only when there is somewhere else to go.
+  pbxSwitchSelect.replaceChildren();
+  for (const link of list) {
+    const opt = document.createElement("option");
+    opt.value = link.key;
+    opt.textContent = link.key === currentKey ? `${link.label} (this one)` : `Switch to ${link.label}`;
+    opt.selected = link.key === currentKey;
+    pbxSwitchSelect.appendChild(opt);
+  }
+  pbxSwitchSelect.hidden = list.length < 2;
+
+  // While not connected: anything already connected can be joined without a password.
+  liveLinksEl.replaceChildren();
+  if (list.length > 0) {
+    const label = document.createElement("span");
+    label.textContent = list.length === 1 ? "Already connected:" : "Already connected to:";
+    liveLinksEl.appendChild(label);
+    for (const link of list) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "secondary small";
+      btn.textContent = `Join ${link.label}`;
+      btn.title = `${link.host} ${link.remoteDir}`;
+      btn.addEventListener("click", () => {
+        switchToPbx(link.key).catch((error) => setStatus(error.message, true));
+      });
+      liveLinksEl.appendChild(btn);
+    }
+  }
+  liveLinksEl.hidden = list.length === 0;
+}
+
+/** Moves this browser onto a PBX someone has connected. The editor is swapped like on a connect. */
+async function switchToPbx(key) {
+  if (key === connectionKeyOf(lastConnectionInfo)) {
+    return;
+  }
+  if (!confirmDiscardEdits("switch to another PBX")) {
+    applyConnections(liveConnections);
+    return;
+  }
+
+  const data = await api("/api/connection/select", { method: "POST", body: JSON.stringify({ key }) });
+  clearWorkspace();
+  workspaceKey = connectionKeyOf(data.connection);
+  lastConnectionInfo = data.connection || null;
+  setConnectionCollapsed(true, data.connection || null);
+  setPhoneModelChoice(null, null);
+  if (data.connection?.profileId) {
+    serverSelect.value = data.connection.profileId;
+    fillFormFromServer(data.connection.profileId);
+  }
+  applyConnections(data.connections);
+  setStatus(data.message || "Switched PBX");
+  await refreshFiles();
+  await refreshLogScopes();
+}
+
+pbxSwitchSelect.addEventListener("change", () => {
+  switchToPbx(pbxSwitchSelect.value).catch((error) => {
+    setStatus(error.message, true);
+    applyConnections(liveConnections);
+  });
+});
 
 async function loadFile(name) {
   const data = await api(`/api/files/${encodeURIComponent(name)}`);
@@ -2836,6 +2925,7 @@ async function connectToPbx(body) {
       setPhoneModelChoice(null, null);
     }
 
+    applyConnections(data.connections);
     // Passwords are not left sitting in the page once they have done their job.
     lastConnectBody = null;
     connectForm.elements.password.value = "";
@@ -2913,11 +3003,12 @@ async function handleDisconnectClick() {
     return;
   }
   try {
-    await disconnectFromServer();
+    const result = await disconnectFromServer();
     clearWorkspace();
     workspaceKey = null;
     lastConnectionInfo = null;
     setConnectionCollapsed(false);
+    applyConnections(result.connections);
     setStatus("Disconnected");
   } catch (error) {
     setStatus(error.message, true);
@@ -4506,6 +4597,7 @@ async function onSignedIn() {
     await loadQuickSchema();
 
     const data = await api("/api/status");
+    applyConnections(data.connections);
     if (data.connected && data.connection) {
       lastConnectionInfo = data.connection;
       workspaceKey = connectionKeyOf(data.connection);

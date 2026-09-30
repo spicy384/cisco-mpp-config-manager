@@ -161,9 +161,10 @@ const AUDIT_RULES = [
       return { target, detail: conn ? `${conn.username}@${conn.host}:${conn.port} ${conn.remoteDir}, ${conn.auth === "key" ? "SSH key" : "password"}` : undefined };
     } },
   { method: "DELETE", path: /^\/api\/connection$/, action: "pbx-disconnect",
-    prepare: () => ({ target: connection ? (connection.profileName || connection.host) : "" }),
-    describe: (req) => ({ target: req.auditContext.target }),
-    skip: (req) => !req.auditContext.target },
+    describe: (req) => ({ target: req.auditTarget }),
+    skip: (req) => !req.auditTarget },
+  { method: "POST", path: /^\/api\/connection\/select$/, action: "pbx-switch",
+    describe: (req) => ({ target: req.auditTarget || String(req.body?.key || "") }) },
   { method: "POST", path: /^\/api\/ssh-key$/, action: "ssh-key-generated",
     describe: (req, res, body) => ({ target: body && body.fingerprint ? body.fingerprint : "", detail: res.statusCode < 400 && req.body?.replace === true ? "replaced the previous key" : undefined }) },
   { method: "DELETE", path: /^\/api\/ssh-key$/, action: "ssh-key-removed" },
@@ -180,6 +181,11 @@ app.use(authGuard.router);
 
 // Everything else under /api requires a signed-in user.
 app.use("/api", authGuard.requireAuth);
+
+// From here on a request knows which PBX it is about (see "PBX connections" below).
+app.use("/api", (req, res, next) => {
+  pbxContext.run({ key: resolveActiveKey(sessionIdOf(req)) }, next);
+});
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -200,38 +206,134 @@ const builder = new XMLBuilder({
   suppressEmptyNode: false
 });
 
-let sftp = null;
-let connection = null;
+// --- PBX connections ---------------------------------------------------------------
+// Several PBXs can be connected at once. Each live connection is a "link", keyed the
+// same way as its change log (profile:<id>, or host|dir for an unsaved one), and each
+// browser session works on one link at a time.
+//
+// A request's link is resolved once, up front, and carried through everything the
+// request starts - including a bulk job that outlives it - so code below simply reads
+// pbx.sftp and pbx.connection and always gets the PBX that request was about.
+const { AsyncLocalStorage } = require("async_hooks");
+const pbxContext = new AsyncLocalStorage();
+const links = new Map();      // key -> { key, sftp, connection }
+const lostLinks = new Map();  // key -> why a link ended without its users asking
+const sessionPbx = new Map(); // session -> the key it works on ("" = chose to be on none)
+
+const pbx = {
+  get key() {
+    const store = pbxContext.getStore();
+    return store ? store.key : null;
+  },
+  get link() {
+    const key = this.key;
+    return key ? links.get(key) || null : null;
+  },
+  get sftp() {
+    const link = this.link;
+    return link ? link.sftp : null;
+  },
+  get connection() {
+    const link = this.link;
+    return link ? link.connection : null;
+  },
+  get lastDisconnect() {
+    const key = this.key;
+    return key ? lostLinks.get(key) || null : null;
+  }
+};
+
+/** Proxy-authenticated callers have no session of their own, so they are told apart by name. */
+function sessionIdOf(req) {
+  return req.session && req.session.id ? req.session.id : `user:${req.user ? req.user.username : ""}`;
+}
+
+/**
+ * Which PBX a session is on: the one it chose while that is live (or was lost, so it
+ * can be told), else the only one connected - which keeps the old behaviour that a
+ * second person signing in finds the shared connection waiting.
+ */
+function resolveActiveKey(sid) {
+  const chosen = sessionPbx.get(sid);
+  if (chosen === "") {
+    return null;
+  }
+  if (chosen && (links.has(chosen) || lostLinks.has(chosen))) {
+    return chosen;
+  }
+  if (links.size === 1) {
+    const only = links.keys().next().value;
+    sessionPbx.set(sid, only);
+    return only;
+  }
+  return null;
+}
+
+/** Ends a link on purpose. Sessions still on it are told why on their next request. */
+async function closeLink(key, reason) {
+  const link = links.get(key);
+  if (!link) {
+    return false;
+  }
+  links.delete(key);
+  registrationCaches.delete(key);
+  deliberatelyClosed.add(link.sftp);
+  if (reason) {
+    lostLinks.set(key, {
+      at: Date.now(),
+      host: link.connection.host,
+      profileId: link.connection.profileId || null,
+      profileName: link.connection.profileName || null,
+      reason
+    });
+  }
+  try {
+    await link.sftp.end();
+  } catch (_) {
+    // Ignore close errors.
+  }
+  return true;
+}
+
+function describeLinks(currentKey) {
+  return [...links.values()].map((link) => ({
+    key: link.key,
+    label: link.connection.profileName || link.connection.host,
+    host: link.connection.host,
+    remoteDir: link.connection.remoteDir,
+    current: link.key === currentKey
+  }));
+}
+
 const fileMetadataCache = new Map();
 
 function buildCacheScope() {
-  if (connection?.profileId) {
-    return `profile:${connection.profileId}`;
+  if (pbx.connection?.profileId) {
+    return `profile:${pbx.connection.profileId}`;
   }
 
-  return `host:${connection?.host || ""}|dir:${connection?.remoteDir || ""}`;
+  return `host:${pbx.connection?.host || ""}|dir:${pbx.connection?.remoteDir || ""}`;
 }
 
 function buildCacheKey(fileName) {
   return `${buildCacheScope()}/${fileName}`;
 }
-// Set when the PBX connection ends without anyone asking for it (idle timeout, PBX
-// reboot, network drop), so the next request can say what happened instead of failing
-// with whatever the SFTP layer happened to throw.
-let lastDisconnect = null;
+// A link that ends without anyone asking for it (idle timeout, PBX reboot, network
+// drop) is remembered in lostLinks, so the next request from a session that was on it
+// can say what happened instead of failing with whatever the SFTP layer threw.
 const deliberatelyClosed = new WeakSet();
 const SKIPPED_CONNECTION_LOST = "Not attempted: the connection to the PBX was lost first.";
 
-function connectionLostMessage() {
-  const where = lastDisconnect.profileName || lastDisconnect.host || "the PBX";
-  return `The connection to ${where} was lost (${lastDisconnect.reason}). Reconnect to continue.`;
+function connectionLostMessage(lost = pbx.lastDisconnect) {
+  const where = lost.profileName || lost.host || "the PBX";
+  return `The connection to ${where} was lost (${lost.reason}). Reconnect to continue.`;
 }
 
 function ensureConnected() {
-  if (sftp && connection) {
+  if (pbx.sftp && pbx.connection) {
     return;
   }
-  if (lastDisconnect) {
+  if (pbx.lastDisconnect) {
     const error = new Error(connectionLostMessage());
     error.connectionLost = true;
     error.status = 503;
@@ -240,33 +342,34 @@ function ensureConnected() {
   throw new Error("Not connected. Use the Connect button first.");
 }
 
-/** Watches a live connection and records when it ends on its own. */
-function watchConnection(client, info) {
+/** Watches a live link and records when it ends on its own. */
+function watchConnection(link) {
+  const info = link.connection;
   let lastError = "";
-  client.client.on("error", (error) => {
+  link.sftp.client.on("error", (error) => {
     lastError = error && error.message ? error.message : String(error);
   });
   // "end" arrives before "close", and the SFTP layer already refuses work by then,
   // so whichever comes first settles it.
   const onGone = () => {
-    if (sftp !== client || deliberatelyClosed.has(client)) {
+    if (links.get(link.key) !== link || deliberatelyClosed.has(link.sftp)) {
       return;
     }
-    sftp = null;
-    connection = null;
-    registrationCache = null;
-    lastDisconnect = {
+    links.delete(link.key);
+    registrationCaches.delete(link.key);
+    const lost = {
       at: Date.now(),
       host: info.host,
       profileId: info.profileId || null,
       profileName: info.profileName || null,
       reason: lastError || "the PBX closed the connection"
     };
-    console.warn(`PBX connection lost: ${info.host} - ${lastDisconnect.reason}`);
-    auditLog.record({ user: "(system)", action: "pbx-connection-lost", target: info.profileName || info.host, detail: lastDisconnect.reason, ok: false });
+    lostLinks.set(link.key, lost);
+    console.warn(`PBX connection lost: ${info.host} - ${lost.reason}`);
+    auditLog.record({ user: "(system)", action: "pbx-connection-lost", target: info.profileName || info.host, detail: lost.reason, ok: false });
   };
-  client.client.on("end", onGone);
-  client.client.on("close", onGone);
+  link.sftp.client.on("end", onGone);
+  link.sftp.client.on("close", onGone);
 }
 
 /**
@@ -275,12 +378,13 @@ function watchConnection(client, info) {
  * so the browser can drop back to the connect form.
  */
 function sendError(res, error, fallbackStatus = 500) {
-  const lost = Boolean(error && error.connectionLost) || (!sftp && Boolean(lastDisconnect));
-  if (lost) {
+  const lostNow = pbx.lastDisconnect;
+  const lost = Boolean(error && error.connectionLost) || (!pbx.sftp && Boolean(lostNow));
+  if (lost && lostNow) {
     return res.status(503).json({
-      error: connectionLostMessage(),
+      error: connectionLostMessage(lostNow),
       connectionLost: true,
-      lastDisconnect,
+      lastDisconnect: lostNow,
       detail: error && !error.connectionLost ? error.message : undefined
     });
   }
@@ -869,7 +973,8 @@ function buildSaveLogEntries(fileName, changes, station = "") {
 // Bulk runs are tracked as jobs so the browser can poll progress while SFTP works
 // through the files one at a time.
 const bulkJobs = new Map();
-let activeBulkJobId = null;
+// PBX key -> the job running on it. One at a time per PBX: they share its connection.
+const activeJobs = new Map();
 const JOB_RETENTION_MS = 10 * 60 * 1000;
 
 function pruneBulkJobs() {
@@ -945,10 +1050,10 @@ async function snapshotBeforeWrite(scope, fileName, remotePath, { user = "", rea
   let raw = xmlText;
 
   if (raw === null) {
-    if (!(await sftp.exists(remotePath))) {
+    if (!(await pbx.sftp.exists(remotePath))) {
       return null;
     }
-    const content = await sftp.get(remotePath);
+    const content = await pbx.sftp.get(remotePath);
     raw = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
   }
 
@@ -970,7 +1075,7 @@ async function snapshotBeforeWrite(scope, fileName, remotePath, { user = "", rea
  * connected server's scope, so one PBX's history can never land on another.
  */
 async function restoreSnapshot(fileName, snapshotId, user = "") {
-  const scope = buildLogScope(connection);
+  const scope = buildLogScope(pbx.connection);
   const snapshot = snapshots.read(scope.key, fileName, snapshotId);
 
   if (!snapshot) {
@@ -979,10 +1084,10 @@ async function restoreSnapshot(fileName, snapshotId, user = "") {
     throw error;
   }
 
-  const remotePath = path.posix.join(connection.remoteDir, fileName);
+  const remotePath = path.posix.join(pbx.connection.remoteDir, fileName);
   const before = await snapshotBeforeWrite(scope, fileName, remotePath, { user, reason: "restore" });
 
-  await sftp.put(Buffer.from(snapshot.content, "utf8"), remotePath);
+  await pbx.sftp.put(Buffer.from(snapshot.content, "utf8"), remotePath);
 
   const restoredEntries = xmlToEntries(snapshot.content).entries;
   const previousEntries = before ? xmlToEntries(before.xmlText).entries : [];
@@ -1053,14 +1158,14 @@ function resyncLogEntry(fileName, station, result) {
 
 /** Tells one phone to fetch its config, reading the file to find its extension. */
 async function resyncPhone(fileName, user = "") {
-  const remotePath = path.posix.join(connection.remoteDir, fileName);
-  const content = await sftp.get(remotePath);
+  const remotePath = path.posix.join(pbx.connection.remoteDir, fileName);
+  const content = await pbx.sftp.get(remotePath);
   const { entries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
   const station = findStationDisplayNameInEntries(entries);
   const ext = findLineExtension(entries);
 
-  const result = await sendResync(sftp.client, connection.resyncCommand, ext);
-  appendLogEntries(buildLogScope(connection), [resyncLogEntry(fileName, station, result)], user);
+  const result = await sendResync(pbx.sftp.client, pbx.connection.resyncCommand, ext);
+  appendLogEntries(buildLogScope(pbx.connection), [resyncLogEntry(fileName, station, result)], user);
 
   return { fileName, station, ...result };
 }
@@ -1074,8 +1179,8 @@ async function resyncChangedPhones(job) {
 
   for (const item of targets) {
     job.currentFile = item.name;
-    item.resync = sftp
-      ? await sendResync(sftp.client, job.request.resyncCommand, item.ext)
+    item.resync = pbx.sftp
+      ? await sendResync(pbx.sftp.client, job.request.resyncCommand, item.ext)
       : { status: "failed", ext: item.ext || null, detail: "the connection to the PBX was lost" };
     job.resyncDone += 1;
   }
@@ -1255,7 +1360,7 @@ async function runSearchJob(job) {
   const criteria = buildSearchCriteria(raw);
 
   ensureConnected();
-  const remoteList = await sftp.list(remoteDir);
+  const remoteList = await pbx.sftp.list(remoteDir);
   const fileNames = remoteList
     .filter((item) => item.type !== "d" && /^spa.*\.xml$/i.test(item.name))
     .map((item) => item.name)
@@ -1268,7 +1373,7 @@ async function runSearchJob(job) {
     job.currentFile = fileName;
     ensureConnected();
     try {
-      const content = await sftp.get(path.posix.join(remoteDir, fileName));
+      const content = await pbx.sftp.get(path.posix.join(remoteDir, fileName));
       const { entries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
       const matches = matchEntries(entries, criteria);
 
@@ -1384,11 +1489,11 @@ async function loadProvisionSource(source) {
     return { label: `template "${template.name}"`, rootKey: template.rootKey || "flat-profile", entries: normalizeEntries(template.entries), model: null };
   }
 
-  const remotePath = path.posix.join(connection.remoteDir, source.file);
-  if (!(await sftp.exists(remotePath))) {
+  const remotePath = path.posix.join(pbx.connection.remoteDir, source.file);
+  if (!(await pbx.sftp.exists(remotePath))) {
     throw new Error(`Source file not found: ${source.file}`);
   }
-  const content = await sftp.get(remotePath);
+  const content = await pbx.sftp.get(remotePath);
   const { rootKey, entries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
   return { label: source.file, rootKey: rootKey || "flat-profile", entries, model: getPhoneModel(source.file) };
 }
@@ -1401,7 +1506,7 @@ async function runProvisionJob(job) {
   const loaded = await loadProvisionSource(source);
   job.sourceLabel = loaded.label;
 
-  const remoteList = await sftp.list(remoteDir);
+  const remoteList = await pbx.sftp.list(remoteDir);
   const existing = new Set(remoteList.filter((item) => item.type !== "d").map((item) => item.name.toLowerCase()));
   const usedExtensions = new Map();
   const cachePrefix = `${buildCacheScope()}/`;
@@ -1444,13 +1549,13 @@ async function runProvisionJob(job) {
       ensureConnected();
       const remotePath = path.posix.join(remoteDir, plan.fileName);
       // Checked again at the moment of writing: the list may be minutes old.
-      if (await sftp.exists(remotePath)) {
+      if (await pbx.sftp.exists(remotePath)) {
         job.results.push({ ...result, status: "error", error: `${plan.fileName} already exists on the PBX` });
         continue;
       }
 
       const xml = entriesToXml(loaded.rootKey, entries);
-      await sftp.put(Buffer.from(xml, "utf8"), remotePath);
+      await pbx.sftp.put(Buffer.from(xml, "utf8"), remotePath);
 
       setFileMetadataCacheEntry(buildCacheKey(plan.fileName), {
         size: Buffer.byteLength(xml, "utf8"),
@@ -1539,16 +1644,16 @@ async function runDriftJob(job) {
   const ignore = buildTagMatcher(criteria.ignore);
 
   ensureConnected();
-  if (!(await sftp.exists(path.posix.join(remoteDir, criteria.baseline)))) {
+  if (!(await pbx.sftp.exists(path.posix.join(remoteDir, criteria.baseline)))) {
     throw new Error(`Baseline file not found: ${criteria.baseline}`);
   }
-  const baseContent = await sftp.get(path.posix.join(remoteDir, criteria.baseline));
+  const baseContent = await pbx.sftp.get(path.posix.join(remoteDir, criteria.baseline));
   const baselineEntries = xmlToEntries(Buffer.isBuffer(baseContent) ? baseContent.toString("utf8") : String(baseContent)).entries;
   criteria.baselineStation = findStationDisplayNameInEntries(baselineEntries);
 
   let fileNames = requested;
   if (!fileNames) {
-    const remoteList = await sftp.list(remoteDir);
+    const remoteList = await pbx.sftp.list(remoteDir);
     fileNames = remoteList
       .filter((item) => item.type !== "d" && /^spa.*\.xml$/i.test(item.name))
       .map((item) => item.name)
@@ -1563,7 +1668,7 @@ async function runDriftJob(job) {
     job.currentFile = fileName;
     ensureConnected();
     try {
-      const content = await sftp.get(path.posix.join(remoteDir, fileName));
+      const content = await pbx.sftp.get(path.posix.join(remoteDir, fileName));
       const { entries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
       const differences = compareToBaseline(baselineEntries, entries, { include, ignore });
 
@@ -1600,14 +1705,15 @@ async function runDriftJob(job) {
 }
 
 function bulkJobIsRunning() {
-  const running = activeBulkJobId && bulkJobs.get(activeBulkJobId);
+  const running = bulkJobs.get(activeJobs.get(pbx.key));
   return Boolean(running && running.status === "running");
 }
 
 /** Runs a job in the background; the client polls /api/bulk-edit/:jobId for progress. */
 function launchJob(job, runner) {
+  const key = pbx.key;
   bulkJobs.set(job.id, job);
-  activeBulkJobId = job.id;
+  activeJobs.set(key, job.id);
 
   runner(job)
     .then(() => {
@@ -1619,8 +1725,8 @@ function launchJob(job, runner) {
     })
     .finally(() => {
       job.finishedAt = Date.now();
-      if (activeBulkJobId === job.id) {
-        activeBulkJobId = null;
+      if (activeJobs.get(key) === job.id) {
+        activeJobs.delete(key);
       }
     });
 }
@@ -1632,7 +1738,7 @@ async function runRollbackJob(job) {
   for (const target of targets) {
     job.currentFile = target.fileName;
 
-    if (!sftp) {
+    if (!pbx.sftp) {
       job.results.push({ name: target.fileName, station: "", status: "error", error: SKIPPED_CONNECTION_LOST });
       job.processed += 1;
       continue;
@@ -1684,7 +1790,7 @@ async function runBulkJob(job) {
   for (const fileName of fileNames) {
     job.currentFile = fileName;
 
-    if (!sftp) {
+    if (!pbx.sftp) {
       job.results.push({ name: fileName, station: "", status: "error", error: SKIPPED_CONNECTION_LOST });
       job.processed += 1;
       continue;
@@ -1692,7 +1798,7 @@ async function runBulkJob(job) {
     const remotePath = path.posix.join(remoteDir, fileName);
 
     try {
-      const content = await sftp.get(remotePath);
+      const content = await pbx.sftp.get(remotePath);
       const xmlText = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
       const { rootKey, entries } = xmlToEntries(xmlText);
 
@@ -1755,7 +1861,7 @@ async function runBulkJob(job) {
         });
         snapshotId = snapshot ? snapshot.id : null;
 
-        await sftp.put(Buffer.from(nextXml, "utf8"), remotePath);
+        await pbx.sftp.put(Buffer.from(nextXml, "utf8"), remotePath);
         setFileMetadataCacheEntry(buildCacheKey(fileName), {
           size: Buffer.byteLength(nextXml, "utf8"),
           modified: Date.now(),
@@ -1922,9 +2028,9 @@ app.post("/api/bulk-edit", (req, res) => {
         dryRun: isDryRun,
         // Only an apply can resync, and only when asked to.
         resync: !isDryRun && req.body?.resync === true,
-        resyncCommand: connection.resyncCommand,
-        remoteDir: connection.remoteDir,
-        scope: buildLogScope(connection),
+        resyncCommand: pbx.connection.resyncCommand,
+        remoteDir: pbx.connection.remoteDir,
+        scope: buildLogScope(pbx.connection),
         // Captured now: the job outlives the request that started it.
         user: req.user ? req.user.username : ""
       }
@@ -1970,8 +2076,8 @@ app.post("/api/search", (req, res) => {
       error: null,
       request: {
         criteria: { tag: criteria.tag, value: criteria.value, mode: criteria.mode },
-        remoteDir: connection.remoteDir,
-        scope: buildLogScope(connection),
+        remoteDir: pbx.connection.remoteDir,
+        scope: buildLogScope(pbx.connection),
         user: req.user ? req.user.username : ""
       }
     };
@@ -2031,8 +2137,8 @@ app.post("/api/provision", authGuard.requireWriter, (req, res) => {
         rows,
         source,
         dryRun: isDryRun,
-        remoteDir: connection.remoteDir,
-        scope: buildLogScope(connection),
+        remoteDir: pbx.connection.remoteDir,
+        scope: buildLogScope(pbx.connection),
         user: req.user ? req.user.username : ""
       }
     };
@@ -2087,8 +2193,8 @@ app.post("/api/drift", (req, res) => {
       request: {
         criteria: { baseline, baselineStation: "", include: parseTagList(req.body?.include), ignore: ignoreList },
         fileNames,
-        remoteDir: connection.remoteDir,
-        scope: buildLogScope(connection),
+        remoteDir: pbx.connection.remoteDir,
+        scope: buildLogScope(pbx.connection),
         user: req.user ? req.user.username : ""
       }
     };
@@ -2118,7 +2224,7 @@ app.post("/api/bulk-edit/:jobId/rollback", authGuard.requireWriter, (req, res) =
       return res.status(400).json({ error: "Only a completed apply can be rolled back." });
     }
 
-    const scope = buildLogScope(connection);
+    const scope = buildLogScope(pbx.connection);
     if (source.request.scope?.key !== scope.key) {
       return res.status(409).json({ error: "That batch was applied to a different server. Connect to it first." });
     }
@@ -2154,7 +2260,7 @@ app.post("/api/bulk-edit/:jobId/rollback", authGuard.requireWriter, (req, res) =
         scope,
         // Off unless asked, like the apply's own tick box.
         resync: req.body?.resync === true,
-        resyncCommand: connection.resyncCommand,
+        resyncCommand: pbx.connection.resyncCommand,
         user: req.user ? req.user.username : ""
       }
     };
@@ -2198,7 +2304,7 @@ app.get("/api/logs", (req, res) => {
 
   scopes.sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
 
-  const current = buildLogScope(connection);
+  const current = buildLogScope(pbx.connection);
   res.json({ scopes, currentScopeKey: current ? current.key : null });
 });
 
@@ -2269,6 +2375,8 @@ app.delete("/api/servers/:id", authGuard.requireWriter, (req, res) => {
   const servers = loadServers();
   const next = servers.filter((s) => s.id !== id);
   saveServers(next);
+  // A connection made from that profile has nothing to belong to any more.
+  closeLink(`profile:${id}`, "its server profile was deleted").catch(() => {});
   res.json({ ok: true });
 });
 
@@ -2364,18 +2472,10 @@ app.post("/api/connect", async (req, res) => {
     return res.status(400).json({ error: "password is required." });
   }
 
-  if (sftp) {
-    deliberatelyClosed.add(sftp);
-    try {
-      await sftp.end();
-    } catch (_) {
-      // Ignore close errors when re-connecting.
-    }
-    // Drop the old state now: if the new connection fails, the app must report
-    // itself disconnected rather than pointing at a closed client.
-    sftp = null;
-    connection = null;
-  }
+  // Other PBXs stay connected. A link to this same PBX, if there is one, is replaced
+  // only once the new connection is up, so a mistyped password costs nothing.
+  const targetKey = target.id ? `profile:${target.id}` : `host:${target.host}|dir:${target.remoteDir}`;
+  const sid = sessionIdOf(req);
 
   const client = new SftpClient();
   const hostPort = Number(target.port) || 22;
@@ -2412,8 +2512,7 @@ app.post("/api/connect", async (req, res) => {
       return res.status(400).json({ error: `Remote directory does not exist: ${target.remoteDir}` });
     }
 
-    sftp = client;
-    connection = {
+    const connection = {
       host: target.host,
       port: Number(target.port) || 22,
       username: target.username,
@@ -2428,13 +2527,26 @@ app.post("/api/connect", async (req, res) => {
       auth: useKey ? "key" : "password",
       hostKey: { fingerprint: hostKey.outcome.fingerprint, status: hostKey.outcome.status }
     };
-    lastDisconnect = null;
-    watchConnection(client, connection);
+    const previous = links.get(targetKey);
+    const link = { key: targetKey, sftp: client, connection };
+    links.set(targetKey, link);
+    lostLinks.delete(targetKey);
+    registrationCaches.delete(targetKey);
+    watchConnection(link);
+    if (previous) {
+      deliberatelyClosed.add(previous.sftp);
+      previous.sftp.end().catch(() => {});
+    }
+
+    // This session now works on that PBX; others stay where they are.
+    sessionPbx.set(sid, targetKey);
+    pbxContext.getStore().key = targetKey;
 
     return res.json({
       ok: true,
       message: `Connected to ${target.host}`,
-      connection
+      connection,
+      connections: describeLinks(targetKey)
     });
   } catch (error) {
     try {
@@ -2444,6 +2556,12 @@ app.post("/api/connect", async (req, res) => {
     }
 
     if (error.code === "HOST_KEY_MISMATCH") {
+      // The host is not the one remembered: an existing link to it is not kept either.
+      await closeLink(targetKey, "its SSH host key changed");
+      if (sessionPbx.get(sid) === targetKey) {
+        sessionPbx.set(sid, "");
+        pbxContext.getStore().key = null;
+      }
       return res.status(409).json({
         error: error.message,
         hostKeyMismatch: true,
@@ -2503,13 +2621,30 @@ app.post("/api/known-hosts/forget", authGuard.requireAdmin, (req, res) => {
 });
 
 app.get("/api/status", (req, res) => {
+  const connection = pbx.connection;
+  const lost = pbx.lastDisconnect;
   res.json({
     connected: Boolean(connection),
     connection,
-    // Present only when the last connection ended on its own.
-    lastDisconnect: connection ? null : lastDisconnect,
-    lostMessage: !connection && lastDisconnect ? connectionLostMessage() : null
+    // Present only when this session's connection ended without it asking.
+    lastDisconnect: connection ? null : lost,
+    lostMessage: !connection && lost ? connectionLostMessage(lost) : null,
+    // Every PBX connected right now, whoever connected it.
+    connections: describeLinks(pbx.key)
   });
+});
+
+// Moves this session onto a PBX that is already connected. No password is asked for:
+// the connection is shared by everyone signed in, exactly as the single one was.
+app.post("/api/connection/select", (req, res) => {
+  const key = String(req.body?.key || "");
+  const link = links.get(key);
+  if (!link) {
+    return res.status(404).json({ error: "That PBX is no longer connected." });
+  }
+  sessionPbx.set(sessionIdOf(req), key);
+  req.auditTarget = link.connection.profileName || link.connection.host;
+  return res.json({ ok: true, message: `Now working on ${req.auditTarget}`, connection: link.connection, connections: describeLinks(key) });
 });
 
 // The browser builds its Quick editor forms from this, so the recipes stay
@@ -2522,7 +2657,7 @@ app.get("/api/files", async (req, res) => {
   try {
     ensureConnected();
 
-    const remoteList = await sftp.list(connection.remoteDir);
+    const remoteList = await pbx.sftp.list(pbx.connection.remoteDir);
     const xmlFiles = remoteList
       .filter((item) => item.type !== "d" && /^spa.*\.xml$/i.test(item.name))
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -2544,12 +2679,12 @@ app.get("/api/files", async (req, res) => {
         continue;
       }
 
-      const remotePath = path.posix.join(connection.remoteDir, item.name);
+      const remotePath = path.posix.join(pbx.connection.remoteDir, item.name);
       let stationDisplayName = "";
       let extension = "";
 
       try {
-        const content = await sftp.get(remotePath);
+        const content = await pbx.sftp.get(remotePath);
         const xmlText = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
         stationDisplayName = extractStationDisplayName(xmlText);
         extension = findLineExtension(xmlToEntries(xmlText).entries) || "";
@@ -2584,9 +2719,9 @@ app.get("/api/files/:name", async (req, res) => {
     ensureConnected();
 
     const fileName = sanitizeFileName(req.params.name);
-    const remotePath = path.posix.join(connection.remoteDir, fileName);
+    const remotePath = path.posix.join(pbx.connection.remoteDir, fileName);
 
-    const content = await sftp.get(remotePath);
+    const content = await pbx.sftp.get(remotePath);
     const xmlText = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
 
     const { rootKey, entries } = xmlToEntries(xmlText);
@@ -2601,7 +2736,7 @@ app.get("/api/files/:name/model", (req, res) => {
   try {
     ensureConnected();
     const fileName = sanitizeFileName(req.params.name);
-    res.json({ fileName, model: getPhoneModel(fileName), profileDefault: connection.defaultModel || null });
+    res.json({ fileName, model: getPhoneModel(fileName), profileDefault: pbx.connection.defaultModel || null });
   } catch (error) {
     sendError(res, error);
   }
@@ -2633,11 +2768,11 @@ app.delete("/api/files/:name", authGuard.requireWriter, async (req, res) => {
     }
 
     const fileName = sanitizeFileName(req.params.name);
-    const remotePath = path.posix.join(connection.remoteDir, fileName);
-    const scope = buildLogScope(connection);
+    const remotePath = path.posix.join(pbx.connection.remoteDir, fileName);
+    const scope = buildLogScope(pbx.connection);
     const user = req.user ? req.user.username : "";
 
-    if (!(await sftp.exists(remotePath))) {
+    if (!(await pbx.sftp.exists(remotePath))) {
       return res.status(404).json({ error: `File not found: ${fileName}` });
     }
 
@@ -2646,7 +2781,7 @@ app.delete("/api/files/:name", authGuard.requireWriter, async (req, res) => {
     const entries = xmlToEntries(snapshot.xmlText).entries;
     const station = findStationDisplayNameInEntries(entries);
 
-    await sftp.delete(remotePath);
+    await pbx.sftp.delete(remotePath);
     deleteFileMetadataCacheEntry(buildCacheKey(fileName));
 
     appendLogEntries(scope, [{
@@ -2687,23 +2822,23 @@ app.post("/api/files/:name/replace", authGuard.requireWriter, async (req, res) =
       return res.status(400).json({ error: "The new MAC is the same as the current one." });
     }
 
-    const sourcePath = path.posix.join(connection.remoteDir, source);
-    const targetPath = path.posix.join(connection.remoteDir, fileName);
-    if (!(await sftp.exists(sourcePath))) {
+    const sourcePath = path.posix.join(pbx.connection.remoteDir, source);
+    const targetPath = path.posix.join(pbx.connection.remoteDir, fileName);
+    if (!(await pbx.sftp.exists(sourcePath))) {
       return res.status(404).json({ error: `File not found: ${source}` });
     }
-    if (await sftp.exists(targetPath)) {
+    if (await pbx.sftp.exists(targetPath)) {
       return res.status(400).json({ error: `File already exists: ${fileName}` });
     }
 
-    const scope = buildLogScope(connection);
+    const scope = buildLogScope(pbx.connection);
     const user = req.user ? req.user.username : "";
-    const content = await sftp.get(sourcePath);
+    const content = await pbx.sftp.get(sourcePath);
     const xmlText = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
     const entries = xmlToEntries(xmlText).entries;
     const station = findStationDisplayNameInEntries(entries);
 
-    await sftp.rename(sourcePath, targetPath);
+    await pbx.sftp.rename(sourcePath, targetPath);
 
     // History and model follow the phone to its new name...
     const movedVersions = snapshots.move(scope.key, source, fileName);
@@ -2771,16 +2906,16 @@ app.post("/api/files/clone", authGuard.requireWriter, async (req, res) => {
       return res.status(400).json({ error: "The new file needs a different name from the phone it is cloned from." });
     }
 
-    const sourcePath = path.posix.join(connection.remoteDir, source);
-    const targetPath = path.posix.join(connection.remoteDir, fileName);
-    if (!(await sftp.exists(sourcePath))) {
+    const sourcePath = path.posix.join(pbx.connection.remoteDir, source);
+    const targetPath = path.posix.join(pbx.connection.remoteDir, fileName);
+    if (!(await pbx.sftp.exists(sourcePath))) {
       return res.status(404).json({ error: `Source file not found: ${source}` });
     }
-    if (await sftp.exists(targetPath)) {
+    if (await pbx.sftp.exists(targetPath)) {
       return res.status(400).json({ error: `File already exists: ${fileName}` });
     }
 
-    const content = await sftp.get(sourcePath);
+    const content = await pbx.sftp.get(sourcePath);
     const { rootKey, entries: sourceEntries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
 
     let entries;
@@ -2796,7 +2931,7 @@ app.post("/api/files/clone", authGuard.requireWriter, async (req, res) => {
     }
 
     const xml = entriesToXml(rootKey || "flat-profile", entries);
-    await sftp.put(Buffer.from(xml, "utf8"), targetPath);
+    await pbx.sftp.put(Buffer.from(xml, "utf8"), targetPath);
 
     const stationDisplayName = findStationDisplayNameInEntries(entries);
     setFileMetadataCacheEntry(buildCacheKey(fileName), {
@@ -2806,7 +2941,7 @@ app.post("/api/files/clone", authGuard.requireWriter, async (req, res) => {
       extension: findLineExtension(entries) || ""
     });
 
-    appendLogEntries(buildLogScope(connection), [{
+    appendLogEntries(buildLogScope(pbx.connection), [{
       ts: Date.now(),
       action: "create",
       file: fileName,
@@ -2840,15 +2975,15 @@ app.post("/api/files/:name", authGuard.requireWriter, async (req, res) => {
     const entries = normalizeEntries(req.body?.entries || []);
 
     const xml = entriesToXml(rootKey, entries);
-    const remotePath = path.posix.join(connection.remoteDir, fileName);
+    const remotePath = path.posix.join(pbx.connection.remoteDir, fileName);
 
-    const scope = buildLogScope(connection);
+    const scope = buildLogScope(pbx.connection);
     const user = req.user ? req.user.username : "";
 
     // Read the file as it is now. Null means a brand new file.
     let currentXml = null;
-    if (await sftp.exists(remotePath)) {
-      const existing = await sftp.get(remotePath);
+    if (await pbx.sftp.exists(remotePath)) {
+      const existing = await pbx.sftp.get(remotePath);
       currentXml = Buffer.isBuffer(existing) ? existing.toString("utf8") : String(existing);
     }
 
@@ -2875,7 +3010,7 @@ app.post("/api/files/:name", authGuard.requireWriter, async (req, res) => {
       : await snapshotBeforeWrite(scope, fileName, remotePath, { user, reason: "save", xmlText: currentXml });
     const previousEntries = snapshot ? xmlToEntries(snapshot.xmlText).entries : null;
 
-    await sftp.put(Buffer.from(xml, "utf8"), remotePath);
+    await pbx.sftp.put(Buffer.from(xml, "utf8"), remotePath);
 
     const stationDisplayName = findStationDisplayNameInEntries(entries);
     setFileMetadataCacheEntry(buildCacheKey(fileName), {
@@ -2917,7 +3052,7 @@ app.get("/api/files/:name/history", (req, res) => {
   try {
     ensureConnected();
     const fileName = sanitizeFileName(req.params.name);
-    const scope = buildLogScope(connection);
+    const scope = buildLogScope(pbx.connection);
 
     res.json({ fileName, keep: SNAPSHOT_KEEP, versions: snapshots.list(scope.key, fileName) });
   } catch (error) {
@@ -2930,7 +3065,7 @@ app.get("/api/files/:name/history/:id", async (req, res) => {
   try {
     ensureConnected();
     const fileName = sanitizeFileName(req.params.name);
-    const scope = buildLogScope(connection);
+    const scope = buildLogScope(pbx.connection);
     const snapshot = snapshots.read(scope.key, fileName, String(req.params.id || ""));
 
     if (!snapshot) {
@@ -2938,11 +3073,11 @@ app.get("/api/files/:name/history/:id", async (req, res) => {
     }
 
     const restored = xmlToEntries(snapshot.content);
-    const remotePath = path.posix.join(connection.remoteDir, fileName);
+    const remotePath = path.posix.join(pbx.connection.remoteDir, fileName);
     let current = null;
 
-    if (await sftp.exists(remotePath)) {
-      const content = await sftp.get(remotePath);
+    if (await pbx.sftp.exists(remotePath)) {
+      const content = await pbx.sftp.get(remotePath);
       current = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content)).entries;
     }
 
@@ -2985,20 +3120,21 @@ app.post("/api/files/:name/restore", authGuard.requireWriter, async (req, res) =
 // --- registration status -----------------------------------------------------
 // The PBX is asked at most every few seconds however often the browser polls.
 const REGISTRATION_TTL_MS = 5000;
-let registrationCache = null;
+const registrationCaches = new Map();
 
 async function fetchRegistrations(force = false) {
-  const scopeKey = buildLogScope(connection).key;
+  const scopeKey = pbx.key;
   const now = Date.now();
-  if (!force && registrationCache && registrationCache.scopeKey === scopeKey && now - registrationCache.fetchedAt < REGISTRATION_TTL_MS) {
-    return registrationCache;
+  const cached = registrationCaches.get(scopeKey);
+  if (!force && cached && now - cached.fetchedAt < REGISTRATION_TTL_MS) {
+    return cached;
   }
 
-  const command = connection.statusCommand;
-  const output = await execOverSsh(sftp.client, command);
+  const command = pbx.connection.statusCommand;
+  const output = await execOverSsh(pbx.sftp.client, command);
   const parsed = parseRegistrations(`${output.stdout}${output.stderr ? `\n${output.stderr}` : ""}`);
 
-  registrationCache = {
+  const fresh = {
     scopeKey,
     fetchedAt: now,
     command,
@@ -3008,7 +3144,8 @@ async function fetchRegistrations(force = false) {
     // Raw output only when nothing could be parsed, so the reason is visible.
     output: parsed.format === "unknown" ? `${output.stdout}${output.stderr}`.trim().slice(0, 2000) : ""
   };
-  return registrationCache;
+  registrationCaches.set(scopeKey, fresh);
+  return fresh;
 }
 
 app.get("/api/registrations", async (req, res) => {
@@ -3075,9 +3212,9 @@ app.post("/api/resync/test", authGuard.requireWriter, async (req, res) => {
   try {
     ensureConnected();
     const ext = String(req.body?.ext || "").trim();
-    const template = resolveResyncCommand(req.body?.resyncCommand ?? connection.resyncCommand);
+    const template = resolveResyncCommand(req.body?.resyncCommand ?? pbx.connection.resyncCommand);
     const command = buildResyncCommand(template, ext);
-    const output = await execOverSsh(sftp.client, command);
+    const output = await execOverSsh(pbx.sftp.client, command);
     const verdict = classifyResyncOutput(output);
 
     return res.json({ ok: verdict.ok, command, code: output.code, stdout: output.stdout, stderr: output.stderr, detail: verdict.detail });
@@ -3094,14 +3231,14 @@ app.post("/api/files", authGuard.requireWriter, async (req, res) => {
     const rootKey = String(req.body?.rootKey || "flat-profile").trim() || "flat-profile";
     const entries = normalizeEntries(req.body?.entries || []);
 
-    const remotePath = path.posix.join(connection.remoteDir, fileName);
-    const exists = await sftp.exists(remotePath);
+    const remotePath = path.posix.join(pbx.connection.remoteDir, fileName);
+    const exists = await pbx.sftp.exists(remotePath);
     if (exists) {
       return res.status(400).json({ error: `File already exists: ${fileName}` });
     }
 
     const xml = entriesToXml(rootKey, entries);
-    await sftp.put(Buffer.from(xml, "utf8"), remotePath);
+    await pbx.sftp.put(Buffer.from(xml, "utf8"), remotePath);
 
     const stationDisplayName = findStationDisplayNameInEntries(entries);
     setFileMetadataCacheEntry(buildCacheKey(fileName), {
@@ -3111,7 +3248,7 @@ app.post("/api/files", authGuard.requireWriter, async (req, res) => {
       extension: findLineExtension(entries) || ""
     });
 
-    appendLogEntries(buildLogScope(connection), [{
+    appendLogEntries(buildLogScope(pbx.connection), [{
       ts: Date.now(),
       action: "create",
       file: fileName,
@@ -3131,24 +3268,21 @@ app.post("/api/files", authGuard.requireWriter, async (req, res) => {
 });
 
 app.delete("/api/connection", authGuard.requireWriter, async (req, res) => {
-  // Asked for, so there is nothing to report as lost afterwards.
-  lastDisconnect = null;
+  const key = pbx.key;
+  const link = pbx.link;
+  const sid = sessionIdOf(req);
 
-  if (!sftp) {
-    connection = null;
-    return res.json({ ok: true });
+  // This session asked, so it is simply on no PBX afterwards (and is not moved onto
+  // another one by itself). Anyone else on the link is told who closed it.
+  sessionPbx.set(sid, "");
+  if (key) {
+    lostLinks.delete(key);
   }
-
-  deliberatelyClosed.add(sftp);
-  try {
-    await sftp.end();
-  } catch (_) {
-    // Ignore close errors.
+  if (link) {
+    req.auditTarget = link.connection.profileName || link.connection.host;
+    await closeLink(key, `disconnected by ${req.user ? req.user.username : "another user"}`);
   }
-
-  sftp = null;
-  connection = null;
-  res.json({ ok: true });
+  res.json({ ok: true, connections: describeLinks(null) });
 });
 
 // Only boot when run directly, so tests can require the pure helpers below

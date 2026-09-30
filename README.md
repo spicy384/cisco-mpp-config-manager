@@ -13,8 +13,19 @@ The app has three pages, reached from the links in the header. Each has its own 
 | **Reporting** | Find in Configs, Drift Report, the Change Log, the Audit Log (administrators) |
 | **Settings** | PBX Servers, SSH Key, Users (administrators), Account |
 
-The bar under the header is on every page. It shows which PBX you are connected to, or a
+The bar under the header is on every page. It shows which PBX you are working on, or a
 saved-server list and password box to connect with, and the latest status message.
+
+### Several PBXs at once
+More than one PBX can be connected at the same time, and each person works on one of
+them. Connecting from Settings adds a PBX without dropping the others; the bar then offers
+a switcher, and while not on any PBX it offers **Join** buttons for the ones already
+connected. Joining needs no password, exactly as sharing the single connection did before:
+the connection belongs to everyone signed in, and roles decide who may change things.
+
+**Disconnect** closes that PBX's connection for everyone on it; they are told who did it.
+Deleting a server profile closes its connection too. Bulk jobs run one at a time per PBX,
+not one in total, so work on one PBX never waits for another.
 
 ## Features
 **Accounts**
@@ -842,9 +853,9 @@ gitignored) or point `DEFAULT_TEMPLATE_PATH` at it. Either takes precedence over
   edit only rewrites files it actually changes, so unaffected files are left untouched.
 - If the connection drops during a bulk apply, the job still finishes: files already written
   are logged and can be rolled back, and the rest are listed as not attempted.
-- The **SFTP connection is shared**: once someone connects, any signed-in user works through
-  that connection. The change log records who did what, but users are not isolated from one
-  another. Give accounts only to people you would trust with the PBX password.
+- **PBX connections are shared**: once someone connects a PBX, any signed-in user can work
+  through that connection. The change log records who did what, but users are not isolated
+  from one another. Give accounts only to people you would trust with the PBX password.
 - The `data/` directory holds accounts, sessions, saved servers, templates, remembered SSH
   host keys, kept file versions and the change log. It is gitignored and must stay that
   way - it contains password hashes, TOTP secrets, and templates and kept versions that

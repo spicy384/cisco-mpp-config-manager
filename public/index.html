@@ -135,6 +135,7 @@
         <span class="conn-dot" aria-hidden="true"></span>
         <strong id="connected-server-name">Connected</strong>
         <span id="connected-fingerprint" class="fingerprint" title="SSH host key fingerprint"></span>
+        <select id="pbx-switch" class="small" aria-label="Switch to another connected PBX" title="Other PBXs are connected too; pick one to work on it" hidden></select>
         <button type="button" id="expand-connection-btn" class="secondary small">Servers</button>
         <button type="button" id="disconnect-mini-btn" class="secondary small writer-only">Disconnect</button>
       </div>
@@ -146,6 +147,7 @@
         <input id="quick-password" type="password" placeholder="Password" aria-label="Password" autocomplete="off" />
         <button type="submit">Connect</button>
         <button type="button" id="manage-servers-btn" class="secondary">Manage Servers</button>
+        <span id="live-links" class="live-links" hidden></span>
       </form>
 
 

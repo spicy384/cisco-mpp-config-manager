@@ -4,6 +4,13 @@ const connectionSummary = document.getElementById("connection-summary");
 const connectedServerNameEl = document.getElementById("connected-server-name");
 const connectForm = document.getElementById("connect-form");
 const disconnectBtn = document.getElementById("disconnect-btn");
+const auditPanel = document.getElementById("audit-panel");
+const auditMetaEl = document.getElementById("audit-meta");
+const auditSearchInput = document.getElementById("audit-search");
+const auditFailuresOnly = document.getElementById("audit-failures-only");
+const auditRefreshBtn = document.getElementById("audit-refresh-btn");
+const auditExportBtn = document.getElementById("audit-export-btn");
+const auditResultsEl = document.getElementById("audit-results");
 const quickConnectForm = document.getElementById("quick-connect-form");
 const quickServerSelect = document.getElementById("quick-server");
 const quickPasswordInput = document.getElementById("quick-password");
@@ -2959,6 +2966,138 @@ expandConnectionBtn.addEventListener("click", () => {
   showPage("settings", "servers-panel");
 });
 
+// --- audit log ------------------------------------------------------------------------------
+
+let auditEntries = [];
+
+const AUDIT_ACTION_LABEL = {
+  setup: "First-run setup",
+  "sign-in": "Sign-in",
+  "sign-out": "Sign-out",
+  "password-changed": "Password changed",
+  "mfa-enabled": "Two-factor enabled",
+  "mfa-disabled": "Two-factor disabled",
+  "mfa-reset": "Two-factor reset",
+  "passkey-added": "Passkey added",
+  "passkey-removed": "Passkey removed",
+  "user-created": "User created",
+  "user-deleted": "User deleted",
+  "role-changed": "Role changed",
+  "server-saved": "Server profile saved",
+  "server-deleted": "Server profile deleted",
+  "template-saved": "Template saved",
+  "pbx-connect": "Connected to PBX",
+  "pbx-disconnect": "Disconnected from PBX",
+  "pbx-switch": "Switched PBX",
+  "pbx-connection-lost": "PBX connection lost",
+  "host-key-forgotten": "Host key forgotten",
+  "ssh-key-generated": "SSH key generated",
+  "ssh-key-removed": "SSH key removed",
+  "change-log-cleared": "Change log cleared"
+};
+
+async function refreshAudit() {
+  const data = await api("/api/audit");
+  auditEntries = data.entries || [];
+  renderAudit();
+}
+
+function filteredAudit() {
+  const q = auditSearchInput.value.trim().toLowerCase();
+  return auditEntries.filter((entry) => {
+    if (auditFailuresOnly.checked && entry.ok) {
+      return false;
+    }
+    if (!q) {
+      return true;
+    }
+    return [entry.user, AUDIT_ACTION_LABEL[entry.action] || entry.action, entry.target, entry.detail, entry.ip]
+      .some((value) => String(value ?? "").toLowerCase().includes(q));
+  });
+}
+
+function renderAudit() {
+  const rows = filteredAudit();
+  auditResultsEl.replaceChildren();
+  auditMetaEl.textContent = auditEntries.length
+    ? `${rows.length} of ${auditEntries.length} entr${auditEntries.length === 1 ? "y" : "ies"}`
+    : "No entries yet";
+  if (rows.length === 0) {
+    return;
+  }
+
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["When", "User", "Action", "Target", "Result", "Detail", "Address"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const entry of rows) {
+    const tr = document.createElement("tr");
+    tr.className = entry.ok ? "bulk-row-changed" : "bulk-row-error";
+    for (const text of [
+      formatTimestamp(entry.ts),
+      entry.user || "-",
+      AUDIT_ACTION_LABEL[entry.action] || entry.action,
+      entry.target || "",
+      entry.ok ? "OK" : "Failed",
+      entry.detail || "",
+      entry.ip || ""
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  auditResultsEl.appendChild(table);
+}
+
+function exportAuditCsv() {
+  const rows = filteredAudit();
+  if (rows.length === 0) {
+    setStatus("Nothing to export.", true);
+    return;
+  }
+  // Prefix a field starting with =,+,-,@ so spreadsheets do not treat it as a formula.
+  const cell = (v) => {
+    const s = String(v ?? "");
+    const safe = /^[=+\-@]/.test(s) ? `'${s}` : s;
+    return `"${safe.replace(/"/g, '""')}"`;
+  };
+  const lines = [["When", "User", "Action", "Target", "Result", "Detail", "Address"].map(cell).join(",")];
+  for (const entry of rows) {
+    lines.push([
+      formatTimestamp(entry.ts), entry.user, AUDIT_ACTION_LABEL[entry.action] || entry.action,
+      entry.target, entry.ok ? "OK" : "Failed", entry.detail, entry.ip
+    ].map(cell).join(","));
+  }
+  const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "pbx-audit-log.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  setStatus(`Exported ${rows.length} audit entr${rows.length === 1 ? "y" : "ies"}.`);
+}
+
+auditSearchInput.addEventListener("input", renderAudit);
+auditFailuresOnly.addEventListener("change", renderAudit);
+auditRefreshBtn.addEventListener("click", () => {
+  refreshAudit().then(() => setStatus("Audit log refreshed")).catch((error) => setStatus(error.message, true));
+});
+auditExportBtn.addEventListener("click", exportAuditCsv);
+
 // --- pages ---------------------------------------------------------------------------------
 // One document, three views. The view is in the URL (#reporting), so Back, reload and
 // bookmarks all land where you expect.
@@ -2992,6 +3131,10 @@ function showPage(name, panelId = null) {
   }
   if (location.hash.replace(/^#/, "") !== page) {
     history[navigate](null, "", `#${page}`);
+  }
+
+  if (changed && page === "reporting" && currentUser?.role === "admin") {
+    refreshAudit().catch((error) => setStatus(error.message, true));
   }
 
   if (changed && page === "settings" && currentUser) {
@@ -3727,6 +3870,10 @@ function applyIdentity(user, token) {
   // Both live on the Settings page: everyone has an account, only admins manage users.
   accountPanel.hidden = !signedIn;
   usersPanel.hidden = !signedIn || user.role !== "admin";
+  auditPanel.hidden = !signedIn || user.role !== "admin";
+  if (signedIn && user.role === "admin" && currentPage === "reporting") {
+    refreshAudit().catch(() => {});
+  }
   if (signedIn && currentPage === "settings") {
     renderAccountPanel();
     if (user.role === "admin") {

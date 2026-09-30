@@ -637,6 +637,32 @@
 
       <div id="log-results" class="bulk-results"></div>
     </section>
+
+    <section class="panel" id="audit-panel" hidden>
+      <div class="panel-head">
+        <h2>Audit Log</h2>
+        <span id="audit-meta" class="badge">Not loaded</span>
+      </div>
+      <p class="bulk-hint">
+        Who did what to the app itself: sign-ins and failed attempts, account and role changes,
+        server profiles, connections and keys. Changes to phone configs are in the Change Log
+        above. Administrators only; it cannot be cleared from the app.
+      </p>
+
+      <div class="log-controls">
+        <label>Filter
+          <input id="audit-search" placeholder="Search user, action, target or address" />
+        </label>
+        <label class="check-inline">
+          <input type="checkbox" id="audit-failures-only" />
+          Failures only
+        </label>
+        <button id="audit-refresh-btn" type="button" class="secondary">Refresh</button>
+        <button id="audit-export-btn" type="button" class="secondary">Export CSV</button>
+      </div>
+
+      <div id="audit-results" class="bulk-results"></div>
+    </section>
     </div>
 
     <div class="page" id="page-settings" data-page="settings" aria-label="Settings" hidden>

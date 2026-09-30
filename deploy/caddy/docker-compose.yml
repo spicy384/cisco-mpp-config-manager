@@ -67,6 +67,8 @@ services:
 
       # Caddy terminates HTTPS, so the browser only ever sends the cookie over TLS.
       COOKIE_SECURE: "true"
+      # One proxy in front, so the audit log records the client's address, not the proxy's.
+      TRUST_PROXY: "1"
 
       # Not needed: the hop to the app stays inside this host's Docker network.
       TLS_ENABLED: "false"

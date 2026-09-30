@@ -31,6 +31,11 @@ services:
       # Secure. Leave false on plain HTTP or sign-in will not work at all.
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
 
+      # Behind a reverse proxy, the number of proxies in front (usually 1), so the audit
+      # log records each client's address rather than the proxy's. Leave unset when the
+      # app is reached directly.
+      TRUST_PROXY: ${TRUST_PROXY:-}
+
       # --- HTTPS -----------------------------------------------------------
       # Encrypts the hop between a reverse proxy and this app, which matters when the
       # proxy runs on a different host. With TLS_ENABLED=true the app generates and

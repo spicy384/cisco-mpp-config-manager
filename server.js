@@ -43,6 +43,14 @@ function resolveDefaultTemplatePath() {
 // Per-server change history is capped so the log file cannot grow without bound.
 const MAX_LOG_ENTRIES_PER_SCOPE = 2000;
 
+// Behind a reverse proxy, say how many proxies to trust (usually 1) so the audit log
+// records the client's address rather than the proxy's. Off by default: trusting
+// forwarded headers from anyone would let a client choose the address it is logged as.
+if (process.env.TRUST_PROXY) {
+  const hops = Number(process.env.TRUST_PROXY);
+  app.set("trust proxy", Number.isInteger(hops) ? hops : process.env.TRUST_PROXY);
+}
+
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -51,6 +59,13 @@ const { resolveTlsOptions } = require("./tls-setup");
 const { quickSchema, normalizeModelChoice } = require("./public/quick-config");
 const { macToFileName } = require("./public/csv-rows");
 const authGuard = createAuth({ dataDir: DATA_DIR });
+const { createAuditLog } = require("./audit-log");
+// Who did what to the app itself (sign-ins, accounts, servers, keys). Phone config
+// changes are in the change log.
+const auditLog = createAuditLog({
+  dataDir: DATA_DIR,
+  keep: Number(process.env.AUDIT_KEEP) > 0 ? Number(process.env.AUDIT_KEEP) : undefined
+});
 const { createHostKeyStore } = require("./host-keys");
 // SSH host keys are remembered on first connection and checked on every later one.
 const hostKeys = createHostKeyStore({ dataDir: DATA_DIR });
@@ -75,6 +90,84 @@ const {
   parseRegistrations,
   statusForExtension
 } = require("./registration");
+
+// --- audit rules -------------------------------------------------------------------
+// Matched against every request before it is routed; see audit-log.js for the shape.
+const userNameById = (id) => (authGuard.loadUsers().find((u) => u.id === id) || {}).username || id;
+const idFromPath = (req, pattern) => decodeURIComponent((pattern.exec(req.path) || [])[1] || "");
+const attemptedUser = (req, res, body) => ({ user: (body && body.user && body.user.username) || req.auditUser || String(req.body?.username || "").trim() });
+
+const AUDIT_RULES = [
+  { method: "POST", path: /^\/api\/auth\/setup$/, action: "setup", public: true,
+    describe: (req) => ({ user: String(req.body?.username || "").trim(), detail: "first administrator created" }) },
+  { method: "POST", path: /^\/api\/auth\/login$/, action: "sign-in", public: true,
+    describe: (req, res, body) => ({
+      ...attemptedUser(req, res, body),
+      detail: res.statusCode < 400 ? (body && body.mfaRequired ? "password accepted, second factor required" : "password") : undefined
+    }) },
+  { method: "POST", path: /^\/api\/auth\/login\/mfa$/, action: "sign-in", public: true,
+    describe: (req, res, body) => ({ ...attemptedUser(req, res, body), detail: res.statusCode < 400 ? "authenticator code" : undefined }) },
+  { method: "POST", path: /^\/api\/auth\/login\/recovery$/, action: "sign-in", public: true,
+    describe: (req, res, body) => ({ ...attemptedUser(req, res, body), detail: res.statusCode < 400 ? "recovery code" : undefined }) },
+  { method: "POST", path: /^\/api\/auth\/passkeys\/login\/verify$/, action: "sign-in", public: true,
+    describe: (req, res, body) => ({ ...attemptedUser(req, res, body), detail: res.statusCode < 400 ? "passkey" : undefined }) },
+  { method: "POST", path: /^\/api\/auth\/logout$/, action: "sign-out" },
+  { method: "POST", path: /^\/api\/auth\/password$/, action: "password-changed" },
+  { method: "POST", path: /^\/api\/auth\/mfa\/confirm$/, action: "mfa-enabled" },
+  { method: "POST", path: /^\/api\/auth\/mfa\/disable$/, action: "mfa-disabled" },
+  { method: "POST", path: /^\/api\/auth\/passkeys\/register\/verify$/, action: "passkey-added",
+    describe: (req) => ({ target: String(req.body?.name || "").trim() }) },
+  { method: "DELETE", path: /^\/api\/auth\/passkeys\/([^/]+)$/, action: "passkey-removed" },
+
+  { method: "POST", path: /^\/api\/users$/, action: "user-created",
+    describe: (req, res, body) => ({ target: String(req.body?.username || "").trim(), detail: body && body.user ? `role ${body.user.role}` : undefined }) },
+  { method: "DELETE", path: /^\/api\/users\/([^/]+)$/, action: "user-deleted",
+    prepare: (req) => ({ target: userNameById(idFromPath(req, /^\/api\/users\/([^/]+)$/)) }),
+    describe: (req) => ({ target: req.auditContext.target }) },
+  { method: "POST", path: /^\/api\/users\/([^/]+)\/role$/, action: "role-changed",
+    prepare: (req) => {
+      const id = idFromPath(req, /^\/api\/users\/([^/]+)\/role$/);
+      const user = authGuard.loadUsers().find((u) => u.id === id);
+      return { target: user ? user.username : id, from: user ? user.role : "" };
+    },
+    describe: (req, res) => ({
+      target: req.auditContext.target,
+      detail: res.statusCode < 400 ? `${req.auditContext.from} -> ${String(req.body?.role || "")}` : undefined
+    }) },
+  { method: "POST", path: /^\/api\/users\/([^/]+)\/reset-mfa$/, action: "mfa-reset",
+    prepare: (req) => ({ target: userNameById(idFromPath(req, /^\/api\/users\/([^/]+)\/reset-mfa$/)) }),
+    describe: (req) => ({ target: req.auditContext.target }) },
+
+  { method: "POST", path: /^\/api\/servers$/, action: "server-saved",
+    describe: (req) => ({ target: `${String(req.body?.name || "").trim()} (${String(req.body?.host || "").trim()})` }) },
+  { method: "DELETE", path: /^\/api\/servers\/([^/]+)$/, action: "server-deleted",
+    prepare: (req) => {
+      const id = idFromPath(req, /^\/api\/servers\/([^/]+)$/);
+      const server = loadServers().find((s) => s.id === id);
+      return { target: server ? `${server.name} (${server.host})` : id };
+    },
+    describe: (req) => ({ target: req.auditContext.target }) },
+  { method: "POST", path: /^\/api\/templates$/, action: "template-saved",
+    describe: (req) => ({ target: String(req.body?.name || "").trim() }) },
+
+  { method: "POST", path: /^\/api\/connect$/, action: "pbx-connect",
+    describe: (req, res, body) => {
+      const conn = body && body.connection;
+      const profile = req.body?.profileId ? loadServers().find((s) => s.id === String(req.body.profileId)) : null;
+      const target = conn ? (conn.profileName || conn.host) : (profile ? profile.name : String(req.body?.host || "").trim());
+      return { target, detail: conn ? `${conn.username}@${conn.host}:${conn.port} ${conn.remoteDir}` : undefined };
+    } },
+  { method: "DELETE", path: /^\/api\/connection$/, action: "pbx-disconnect",
+    prepare: () => ({ target: connection ? (connection.profileName || connection.host) : "" }),
+    describe: (req) => ({ target: req.auditContext.target }),
+    skip: (req) => !req.auditContext.target },
+  { method: "POST", path: /^\/api\/known-hosts\/forget$/, action: "host-key-forgotten",
+    describe: (req) => ({ target: `${String(req.body?.host || "").trim()}:${Number(req.body?.port) || 22}` }) },
+  { method: "DELETE", path: /^\/api\/logs\/(.+)$/, action: "change-log-cleared",
+    describe: (req, res, body) => ({ target: idFromPath(req, /^\/api\/logs\/(.+)$/), detail: body && body.cleared !== undefined ? `${body.cleared} entries` : undefined }) }
+];
+
+app.use(auditLog.middleware(AUDIT_RULES));
 
 // Auth endpoints are mounted first: they must be reachable while signed out.
 app.use(authGuard.router);
@@ -164,6 +257,7 @@ function watchConnection(client, info) {
       reason: lastError || "the PBX closed the connection"
     };
     console.warn(`PBX connection lost: ${info.host} - ${lastDisconnect.reason}`);
+    auditLog.record({ user: "(system)", action: "pbx-connection-lost", target: info.profileName || info.host, detail: lastDisconnect.reason, ok: false });
   };
   client.client.on("end", onGone);
   client.client.on("close", onGone);
@@ -2340,6 +2434,11 @@ app.post("/api/connect", async (req, res) => {
 
     return res.status(500).json({ error: error.message || "Connection failed." });
   }
+});
+
+// The audit log is for administrators, and there is no route that clears it.
+app.get("/api/audit", authGuard.requireAdmin, (req, res) => {
+  res.json({ keep: auditLog.keep, entries: auditLog.list({ limit: Number(req.query.limit) || 1000 }) });
 });
 
 // Remembered SSH host keys. Forgetting one is an administrator action because it is

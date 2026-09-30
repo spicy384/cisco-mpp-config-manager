@@ -39,6 +39,8 @@ services:
 
       # The browser reaches the proxy over HTTPS, so the cookie must be Secure.
       COOKIE_SECURE: "true"
+      # One proxy in front, so the audit log records the client's address, not the proxy's.
+      TRUST_PROXY: "1"
 
       # Only if the proxy itself authenticates (Authelia, Authentik) AND strips
       # this header from client requests. Leave off for plain TLS proxying.

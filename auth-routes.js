@@ -502,6 +502,7 @@ function createAuth({ dataDir }) {
     if (!user) {
       return res.status(401).json({ error: "Sign-in expired. Start again." });
     }
+    req.auditUser = user.username;
 
     if (isLockedOut(user)) {
       return res.status(429).json({ error: "Too many failed attempts. Try again later." });
@@ -536,6 +537,7 @@ function createAuth({ dataDir }) {
     if (!user) {
       return res.status(401).json({ error: "Sign-in expired. Start again." });
     }
+    req.auditUser = user.username;
 
     const supplied = auth.hashRecoveryCode(req.body?.code);
     const remaining = (user.recoveryCodes || []).filter((h) => h !== supplied);
@@ -671,6 +673,7 @@ function createAuth({ dataDir }) {
     const found = findUserByPasskey(response.id);
     if (!found) return refuse();
     const { user, passkey } = found;
+    req.auditUser = user.username;
     if (isLockedOut(user)) {
       return res.status(429).json({ error: "Too many failed attempts. Try again later." });
     }

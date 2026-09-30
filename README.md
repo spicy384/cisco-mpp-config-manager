@@ -10,7 +10,7 @@ The app has three pages, reached from the links in the header. Each has its own 
 | Page | What is on it |
 |---|---|
 | **Configuration** | The phone list and editor, Bulk Edit, Add Phones from a List |
-| **Reporting** | Find in Configs, Drift Report, the Change Log |
+| **Reporting** | Find in Configs, Drift Report, the Change Log, the Audit Log (administrators) |
 | **Settings** | PBX Servers, Users (administrators), Account |
 
 The bar under the header is on every page. It shows which PBX you are connected to, or a
@@ -20,6 +20,7 @@ saved-server list and password box to connect with, and the latest status messag
 **Accounts**
 - Sign-in with per-user accounts, optional TOTP two-factor and single-use recovery codes
 - Administrator, user and read-only viewer roles; every write is attributed to the user who made it
+- An audit log of sign-ins, failed attempts, account changes and connections, for administrators
 - Can run behind an authentication reverse proxy instead (Authelia, Authentik, oauth2-proxy)
 - SSH host keys are remembered on first connection and checked every time after, so the
   PBX password is never sent to a host that is not the one you connected to before
@@ -490,6 +491,8 @@ The container logs which template it resolved at startup, so check `docker compo
 | `TLS_CERT` / `TLS_KEY` | unset | Paths to your own certificate and key; take precedence over `TLS_ENABLED` |
 | `TRUST_PROXY_AUTH` | `false` | Accept a reverse proxy's authentication header (see above) |
 | `SNAPSHOT_KEEP` | `20` | Versions kept per config file for restore and rollback |
+| `AUDIT_KEEP` | `5000` | Entries kept in the audit log |
+| `TRUST_PROXY` | unset | Number of reverse proxies in front, so the audit log records client addresses |
 | `PROXY_USER_HEADER` | `remote-user` | Which header carries the username in that mode |
 
 ### Updating
@@ -569,6 +572,28 @@ An administrator opens **Settings > Users** and clicks **Reset MFA**. That user 
 their password alone and enrol again. If the *only* administrator is locked out, stop the
 container, edit `users.json` in the data directory, set `"mfaEnrolled": false` and
 `"totpSecret": null` on that account, and start it again.
+
+### Audit log
+The Change Log records what was done to phone configs. The **Audit Log**, on the Reporting
+page and visible to administrators only, records what was done to the app itself:
+
+- every sign-in and failed attempt, with the method (password, authenticator code, recovery
+  code, passkey) and the address it came from; lockouts; sign-outs
+- password changes, two-factor enabled, disabled or reset, passkeys added or removed
+- users created or deleted and role changes
+- server profiles and templates saved or deleted
+- connecting to and disconnecting from a PBX, connections that dropped on their own, and
+  refused attempts such as a changed host key
+- a stored host key being forgotten, and the change log being cleared
+- anything a read-only account tried to do and was refused
+
+It can be filtered, narrowed to failures, and exported as CSV. It is kept in
+`audit-log.json` in the data directory, newest 5,000 entries (`AUDIT_KEEP`), and
+deliberately cannot be cleared from the app.
+
+Behind a reverse proxy every request arrives from the proxy, so set `TRUST_PROXY=1` (the
+number of proxies in front) for the log to record the real client address. Leave it unset
+when the app is reached directly: it makes the app believe the `X-Forwarded-For` header.
 
 ### SSH host keys
 The app works like OpenSSH's `known_hosts`. The first time it connects to a PBX it

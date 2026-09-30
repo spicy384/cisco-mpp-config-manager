@@ -1610,6 +1610,18 @@ body.auth-locked .header-actions {
   overflow-wrap: anywhere;
 }
 
+#provision-panel textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.bulk-results tr.bulk-row-warning td:last-child {
+  color: #b45309;
+}
+
 .history-diff {
   margin-top: 12px;
   padding-top: 12px;

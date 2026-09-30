@@ -49,6 +49,7 @@ app.use(express.static(path.join(__dirname, "public")));
 const { createAuth } = require("./auth-routes");
 const { resolveTlsOptions } = require("./tls-setup");
 const { quickSchema, normalizeModelChoice } = require("./public/quick-config");
+const { macToFileName } = require("./public/csv-rows");
 const authGuard = createAuth({ dataDir: DATA_DIR });
 const { createHostKeyStore } = require("./host-keys");
 // SSH host keys are remembered on first connection and checked on every later one.
@@ -801,6 +802,7 @@ function jobToJson(job) {
     finishedAt: job.finishedAt || null,
     rollbackOf: job.request.rollbackOf || null,
     unmatched: job.unmatched || 0,
+    sourceLabel: job.sourceLabel || null,
     criteria: job.request.criteria || null,
     resync: Boolean(job.request.resync),
     stage: job.stage || "write",
@@ -1196,6 +1198,189 @@ async function runSearchJob(job) {
   }
 
   job.currentFile = null;
+}
+
+// --- provisioning from a list ---------------------------------------------------------
+const MAX_PROVISION_ROWS = 500;
+
+/**
+ * Checks a list of phones to create before anything is written: every row gets its
+ * file name, and the problems that would stop it (errors) or that the operator
+ * should know about (warnings). `existing` is the set of file names already on the
+ * PBX, lower-cased; `usedExtensions` maps an extension to the file that has it.
+ */
+function planProvisionRows(rows, { existing = new Set(), usedExtensions = new Map(), sourceHasPassword = false } = {}) {
+  const seenFiles = new Map();
+  const seenExtensions = new Map();
+
+  return rows.map((row, index) => {
+    const line = Number(row?.line) || index + 1;
+    const ext = String(row?.ext == null ? "" : row.ext).trim();
+    const fileName = macToFileName(row?.mac);
+    const plan = {
+      line,
+      mac: String(row?.mac == null ? "" : row.mac).trim(),
+      fileName,
+      ext,
+      displayName: String(row?.displayName == null ? "" : row.displayName).trim(),
+      password: String(row?.password == null ? "" : row.password),
+      station: String(row?.station == null ? "" : row.station).trim(),
+      errors: [],
+      warnings: []
+    };
+
+    if (!fileName) {
+      plan.errors.push(plan.mac ? `"${plan.mac}" is not a MAC address (12 hex digits) or a .xml file name` : "no MAC address");
+    } else if (/[/\\]/.test(fileName) || !PHONE_FILE_PATTERN.test(fileName)) {
+      plan.errors.push("the file must be named spa<MAC>.xml");
+    } else {
+      const key = fileName.toLowerCase();
+      if (seenFiles.has(key)) {
+        plan.errors.push(`same phone as line ${seenFiles.get(key)}`);
+      } else {
+        seenFiles.set(key, line);
+        if (existing.has(key)) {
+          plan.errors.push(`${fileName} already exists on the PBX`);
+        }
+      }
+    }
+
+    if (!ext) {
+      plan.errors.push("no extension");
+    } else {
+      if (seenExtensions.has(ext)) {
+        plan.warnings.push(`extension ${ext} is also on line ${seenExtensions.get(ext)}`);
+      } else {
+        seenExtensions.set(ext, line);
+      }
+      if (usedExtensions.has(ext)) {
+        plan.warnings.push(`extension ${ext} is already on ${usedExtensions.get(ext)}`);
+      }
+    }
+
+    if (!plan.password) {
+      plan.warnings.push(sourceHasPassword ? "no SIP password given: the source's is copied" : "no SIP password");
+    }
+
+    return plan;
+  });
+}
+
+/** The config to copy from: a phone on the PBX or a saved template. */
+async function loadProvisionSource(source) {
+  if (source.templateId) {
+    const template = source.templateId === "default"
+      ? getDefaultTemplate()
+      : loadTemplates().find((t) => t.id === source.templateId);
+    if (!template) {
+      throw new Error("Template not found.");
+    }
+    if (!Array.isArray(template.entries) || template.entries.length === 0) {
+      throw new Error(`Template "${template.name}" is empty.`);
+    }
+    return { label: `template "${template.name}"`, rootKey: template.rootKey || "flat-profile", entries: normalizeEntries(template.entries), model: null };
+  }
+
+  const remotePath = path.posix.join(connection.remoteDir, source.file);
+  if (!(await sftp.exists(remotePath))) {
+    throw new Error(`Source file not found: ${source.file}`);
+  }
+  const content = await sftp.get(remotePath);
+  const { rootKey, entries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
+  return { label: source.file, rootKey: rootKey || "flat-profile", entries, model: getPhoneModel(source.file) };
+}
+
+/** Creates (or, as a dry run, only checks) every phone in the list. */
+async function runProvisionJob(job) {
+  const { rows, source, dryRun, remoteDir, scope, user } = job.request;
+
+  ensureConnected();
+  const loaded = await loadProvisionSource(source);
+  job.sourceLabel = loaded.label;
+
+  const remoteList = await sftp.list(remoteDir);
+  const existing = new Set(remoteList.filter((item) => item.type !== "d").map((item) => item.name.toLowerCase()));
+  const usedExtensions = new Map();
+  const cachePrefix = `${buildCacheScope()}/`;
+  for (const [key, meta] of fileMetadataCache.entries()) {
+    if (key.startsWith(cachePrefix) && meta && meta.extension && existing.has(key.slice(cachePrefix.length).toLowerCase())) {
+      usedExtensions.set(meta.extension, key.slice(cachePrefix.length));
+    }
+  }
+
+  const sourceHasPassword = loaded.entries.some((e) => e.key === "Password_1_" && String(e.value || "") !== "");
+  const plans = planProvisionRows(rows, { existing, usedExtensions, sourceHasPassword });
+  const logEntries = [];
+
+  for (const plan of plans) {
+    job.currentFile = plan.fileName || `line ${plan.line}`;
+    const result = {
+      name: plan.fileName || "",
+      line: plan.line,
+      ext: plan.ext,
+      station: plan.station,
+      warnings: plan.warnings
+    };
+
+    try {
+      if (plan.errors.length > 0) {
+        job.results.push({ ...result, status: "error", error: plan.errors.join("; ") });
+        continue;
+      }
+
+      const entries = buildClonedEntries(loaded.entries, {
+        ext: plan.ext, displayName: plan.displayName, password: plan.password, station: plan.station
+      });
+      result.station = findStationDisplayNameInEntries(entries);
+
+      if (dryRun) {
+        job.results.push({ ...result, status: "ready" });
+        continue;
+      }
+
+      ensureConnected();
+      const remotePath = path.posix.join(remoteDir, plan.fileName);
+      // Checked again at the moment of writing: the list may be minutes old.
+      if (await sftp.exists(remotePath)) {
+        job.results.push({ ...result, status: "error", error: `${plan.fileName} already exists on the PBX` });
+        continue;
+      }
+
+      const xml = entriesToXml(loaded.rootKey, entries);
+      await sftp.put(Buffer.from(xml, "utf8"), remotePath);
+
+      setFileMetadataCacheEntry(buildCacheKey(plan.fileName), {
+        size: Buffer.byteLength(xml, "utf8"),
+        modified: Date.now(),
+        stationDisplayName: result.station,
+        extension: plan.ext
+      });
+      if (loaded.model) {
+        setPhoneModel(plan.fileName, loaded.model);
+      }
+
+      logEntries.push({
+        ts: Date.now(),
+        action: "create",
+        file: plan.fileName,
+        station: result.station,
+        tag: null,
+        before: null,
+        after: `Created from ${loaded.label} by list (${entries.length} field${entries.length === 1 ? "" : "s"}), line 1 = ${plan.ext}`,
+        status: "changed",
+        error: null,
+        snapshotId: null
+      });
+      job.results.push({ ...result, status: "created" });
+    } catch (error) {
+      job.results.push({ ...result, status: "error", error: error.message });
+    } finally {
+      job.processed += 1;
+    }
+  }
+
+  job.currentFile = null;
+  appendLogEntries(scope, logEntries, user);
 }
 
 // --- drift report -------------------------------------------------------------------
@@ -1690,6 +1875,67 @@ app.post("/api/search", (req, res) => {
 
     launchJob(job, runSearchJob);
     return res.status(202).json({ jobId: job.id, dryRun: true });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+// Creates many phones from a list in one job. A dry run (the default) only checks the
+// list, so the operator sees every problem before anything is written.
+app.post("/api/provision", authGuard.requireWriter, (req, res) => {
+  try {
+    ensureConnected();
+    pruneBulkJobs();
+
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    if (rows.length === 0) {
+      return res.status(400).json({ error: "The list has no phones in it." });
+    }
+    if (rows.length > MAX_PROVISION_ROWS) {
+      return res.status(400).json({ error: `A list can hold at most ${MAX_PROVISION_ROWS} phones; this one has ${rows.length}.` });
+    }
+
+    let source;
+    try {
+      if (req.body?.source?.templateId) {
+        source = { templateId: String(req.body.source.templateId) };
+      } else {
+        source = { file: sanitizeFileName(String(req.body?.source?.file || "")) };
+      }
+    } catch {
+      return res.status(400).json({ error: "Choose a phone or a template to copy from." });
+    }
+    if (bulkJobIsRunning()) {
+      return res.status(409).json({ error: "A bulk edit is already running. Wait for it to finish." });
+    }
+
+    const isDryRun = req.body?.dryRun !== false;
+    const job = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      status: "running",
+      dryRun: isDryRun,
+      key: source.file || source.templateId,
+      mode: "provision",
+      editCount: 0,
+      total: rows.length,
+      processed: 0,
+      currentFile: null,
+      results: [],
+      startedAt: Date.now(),
+      finishedAt: null,
+      error: null,
+      request: {
+        rows,
+        source,
+        dryRun: isDryRun,
+        remoteDir: connection.remoteDir,
+        scope: buildLogScope(connection),
+        user: req.user ? req.user.username : ""
+      }
+    };
+
+    launchJob(job, runProvisionJob);
+    return res.status(202).json({ jobId: job.id, total: job.total, dryRun: isDryRun });
   } catch (error) {
     return sendError(res, error);
   }
@@ -2833,6 +3079,7 @@ module.exports = {
   applyBulkEdit,
   buildSearchCriteria,
   matchEntries,
+  planProvisionRows,
   parseTagList,
   buildTagMatcher,
   compareToBaseline,

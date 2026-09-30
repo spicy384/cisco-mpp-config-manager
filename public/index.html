@@ -610,6 +610,53 @@
       <div id="bulk-results" class="bulk-results"></div>
     </section>
 
+    <section class="panel writer-only" id="provision-panel">
+      <div class="panel-head">
+        <h2>Add Phones from a List</h2>
+        <span id="provision-count" class="badge">No list checked yet</span>
+      </div>
+      <p class="bulk-hint">
+        Create many phones at once. Every phone is a copy of the source with its own MAC,
+        extension, display name, SIP password and station name. <strong>Check List</strong>
+        reads the list and reports problems without writing anything.
+      </p>
+
+      <div class="bulk-controls">
+        <label>Copy settings from
+          <select id="provision-source"></select>
+        </label>
+        <label>Load a CSV file
+          <input id="provision-file" type="file" accept=".csv,.txt,.tsv,text/csv,text/plain" />
+        </label>
+      </div>
+      <label>Phones, one per line (paste from a spreadsheet, or type)
+        <textarea id="provision-text" class="mono" rows="7" spellcheck="false"
+          placeholder="mac,extension,name,password,station&#10;00:11:22:33:44:55,1001,Front Desk,s3cret-1,Front Desk - 1001&#10;00:11:22:33:44:56,1002,Kitchen,s3cret-2,Kitchen - 1002"></textarea>
+      </label>
+      <p class="bulk-hint">
+        Columns: MAC address, extension, display name, SIP password, station name. With a
+        header row they may come in any order; only MAC and extension are required. Commas,
+        tabs and semicolons all work.
+      </p>
+
+      <div class="actions">
+        <button id="provision-check-btn" type="button">Check List</button>
+        <button id="provision-create-btn" type="button" class="danger" disabled>Create Phones</button>
+      </div>
+
+      <div id="provision-progress" class="bulk-progress" hidden>
+        <div class="bulk-progress-head">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="provision-progress-label">Checking...</span>
+        </div>
+        <div class="progress-track">
+          <div id="provision-progress-bar" class="progress-bar"></div>
+        </div>
+      </div>
+
+      <div id="provision-results" class="bulk-results"></div>
+    </section>
+
     <section class="panel" id="log-panel">
       <div class="panel-head">
         <h2>Change Log</h2>
@@ -725,6 +772,7 @@
 
   <!-- Shared with the server: the live preview and what gets written cannot disagree. -->
   <script src="/quick-config.js"></script>
+  <script src="/csv-rows.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

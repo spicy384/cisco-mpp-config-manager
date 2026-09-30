@@ -102,6 +102,16 @@ const clonePasswordInput = document.getElementById("clone-password");
 const cloneStationInput = document.getElementById("clone-station");
 const cloneFilePreview = document.getElementById("clone-file-preview");
 const cloneCreateBtn = document.getElementById("clone-create-btn");
+const provisionSourceSelect = document.getElementById("provision-source");
+const provisionFileInput = document.getElementById("provision-file");
+const provisionTextInput = document.getElementById("provision-text");
+const provisionCheckBtn = document.getElementById("provision-check-btn");
+const provisionCreateBtn = document.getElementById("provision-create-btn");
+const provisionCountEl = document.getElementById("provision-count");
+const provisionProgressEl = document.getElementById("provision-progress");
+const provisionProgressLabelEl = document.getElementById("provision-progress-label");
+const provisionProgressBarEl = document.getElementById("provision-progress-bar");
+const provisionResultsEl = document.getElementById("provision-results");
 const driftBaselineSelect = document.getElementById("drift-baseline");
 const driftIncludeInput = document.getElementById("drift-include");
 const driftIgnoreInput = document.getElementById("drift-ignore");
@@ -631,6 +641,7 @@ async function refreshTemplates() {
   const data = await api("/api/templates");
   templates = data.templates || [];
   renderTemplateOptions();
+  populateProvisionSources();
 }
 
 async function getTemplateById(id) {
@@ -660,6 +671,7 @@ async function refreshFiles() {
     const data = await api("/api/files");
     allFiles = data.files || [];
     populateDriftBaselines();
+    populateProvisionSources();
 
     // Drop selections for files that no longer exist on the server.
     const present = new Set(allFiles.map((file) => file.name));
@@ -2135,6 +2147,194 @@ replaceConfirmBtn.addEventListener("click", () => {
 });
 deletePhoneBtn.addEventListener("click", () => {
   deleteOpenPhone().catch((error) => setStatus(error.message, true));
+});
+
+// --- add phones from a list --------------------------------------------------------------
+
+// The list as it was when last checked; Create only ever sends a checked list.
+let checkedProvision = null;
+
+/** Sources are the open phone, any phone on the PBX, or a saved template. */
+function populateProvisionSources() {
+  const previous = provisionSourceSelect.value;
+  provisionSourceSelect.replaceChildren();
+  const add = (value, text) => {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = text;
+    provisionSourceSelect.appendChild(opt);
+  };
+
+  add("open", "(the open phone)");
+  for (const file of allFiles) {
+    add(`file:${file.name}`, `Phone: ${file.stationDisplayName ? `${file.stationDisplayName} (${file.name})` : file.name}`);
+  }
+  for (const tpl of templates) {
+    add(`template:${tpl.id}`, `Template: ${tpl.name}`);
+  }
+  provisionSourceSelect.value = [...provisionSourceSelect.options].some((o) => o.value === previous) ? previous : "open";
+}
+
+function readProvisionSource() {
+  const value = provisionSourceSelect.value;
+  if (value.startsWith("template:")) {
+    return { templateId: value.slice("template:".length) };
+  }
+  const file = value.startsWith("file:") ? value.slice("file:".length) : currentFile;
+  if (!file) {
+    throw new Error("Open the phone to copy from, or choose a phone or template in the list.");
+  }
+  return { file };
+}
+
+function invalidateProvisionCheck() {
+  checkedProvision = null;
+  provisionCreateBtn.disabled = true;
+}
+
+function setProvisionBusy(busy, verb) {
+  provisionCheckBtn.disabled = busy;
+  provisionCreateBtn.disabled = busy || !checkedProvision;
+  provisionProgressEl.hidden = !busy;
+  if (busy) {
+    provisionProgressBarEl.style.width = "0%";
+    provisionProgressLabelEl.textContent = `${verb}...`;
+  }
+}
+
+function renderProvisionResults(job) {
+  provisionResultsEl.replaceChildren();
+  const counts = job.summary || {};
+  const good = job.dryRun ? (counts.ready || 0) : (counts.created || 0);
+  const bad = counts.error || 0;
+  provisionCountEl.textContent = job.dryRun
+    ? `${good} ready to create${bad ? `, ${bad} with problems` : ""}`
+    : `${good} created${bad ? `, ${bad} not created` : ""}`;
+
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["Line", "File", "Extension", "Station", "Status", "Notes"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const STATUS = { ready: "Ready", created: "Created", error: "Problem" };
+  const tbody = document.createElement("tbody");
+  for (const item of job.results || []) {
+    const tr = document.createElement("tr");
+    const warnings = item.warnings || [];
+    tr.className = item.status === "error"
+      ? "bulk-row-error"
+      : (warnings.length ? "bulk-row-changed bulk-row-warning" : "bulk-row-changed");
+    const notes = item.status === "error" ? item.error : warnings.join("; ");
+    for (const text of [String(item.line), item.name || "-", item.ext || "-", item.station || "-", STATUS[item.status] || item.status, notes || ""]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  provisionResultsEl.appendChild(table);
+}
+
+async function runProvision(dryRun) {
+  const source = dryRun ? readProvisionSource() : checkedProvision.source;
+  const rows = dryRun ? CsvRows.parsePhoneList(provisionTextInput.value).phones : checkedProvision.rows;
+  if (rows.length === 0) {
+    throw new Error("The list is empty. Paste the phones to add, one per line.");
+  }
+
+  const verb = dryRun ? "Checking" : "Creating";
+  const start = await api("/api/provision", { method: "POST", body: JSON.stringify({ source, rows, dryRun }) });
+  setProvisionBusy(true, verb);
+  let job;
+  try {
+    job = await pollJob(start.jobId, (j) => {
+      const total = j.total || 0;
+      const done = j.processed || 0;
+      provisionProgressBarEl.style.width = `${total ? Math.round((done / total) * 100) : 0}%`;
+      provisionProgressLabelEl.textContent = j.currentFile ? `${verb} ${done + 1} of ${total}: ${j.currentFile}` : `${verb} ${done} of ${total}`;
+    });
+  } finally {
+    setProvisionBusy(false);
+  }
+
+  renderProvisionResults(job);
+  return { job, source, rows };
+}
+
+async function checkProvisionList() {
+  invalidateProvisionCheck();
+  const { job, source, rows } = await runProvision(true);
+  const ready = job.summary?.ready || 0;
+  const problems = job.summary?.error || 0;
+
+  if (ready > 0) {
+    // Only the rows that passed are sent when creating.
+    const readyLines = new Set(job.results.filter((r) => r.status === "ready").map((r) => r.line));
+    checkedProvision = { source, rows: rows.filter((row) => readyLines.has(row.line)), sourceLabel: job.sourceLabel, problems };
+    provisionCreateBtn.disabled = false;
+  }
+  setStatus(
+    ready
+      ? `${ready} phone${ready === 1 ? "" : "s"} ready to create from ${job.sourceLabel}${problems ? `; ${problems} line${problems === 1 ? " has" : "s have"} problems and will be skipped` : ""}.`
+      : "Nothing in the list can be created. See the notes on each line.",
+    ready === 0
+  );
+}
+
+async function createProvisionedPhones() {
+  if (!checkedProvision) {
+    setStatus("Check the list first.", true);
+    return;
+  }
+  const count = checkedProvision.rows.length;
+  if (!confirm(
+    `Create ${count} phone${count === 1 ? "" : "s"} on the PBX now?\n\n`
+      + `Each is a copy of ${checkedProvision.sourceLabel} with its own MAC, extension and names.`
+      + (checkedProvision.problems ? `\n\n${checkedProvision.problems} line${checkedProvision.problems === 1 ? "" : "s"} with problems will be skipped.` : "")
+  )) {
+    setStatus("Nothing was created.");
+    return;
+  }
+
+  const { job } = await runProvision(false);
+  invalidateProvisionCheck();
+  const created = job.summary?.created || 0;
+  const failed = job.summary?.error || 0;
+  setStatus(`Created ${created} phone${created === 1 ? "" : "s"}${failed ? `, ${failed} failed` : ""}.`, failed > 0);
+  await refreshFiles();
+  await refreshLogScopes();
+}
+
+provisionCheckBtn.addEventListener("click", () => {
+  checkProvisionList().catch((error) => setStatus(error.message, true));
+});
+provisionCreateBtn.addEventListener("click", () => {
+  createProvisionedPhones().catch((error) => setStatus(error.message, true));
+});
+provisionTextInput.addEventListener("input", invalidateProvisionCheck);
+provisionSourceSelect.addEventListener("change", invalidateProvisionCheck);
+provisionFileInput.addEventListener("change", async () => {
+  const file = provisionFileInput.files && provisionFileInput.files[0];
+  if (!file) {
+    return;
+  }
+  try {
+    provisionTextInput.value = await file.text();
+    invalidateProvisionCheck();
+    const n = CsvRows.parsePhoneList(provisionTextInput.value).phones.length;
+    setStatus(`Loaded ${file.name}: ${n} phone${n === 1 ? "" : "s"}. Check the list before creating.`);
+  } catch (error) {
+    setStatus(`Could not read ${file.name}: ${error.message}`, true);
+  } finally {
+    provisionFileInput.value = "";
+  }
 });
 
 // --- drift report -----------------------------------------------------------------------

@@ -31,6 +31,7 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
   writer, so two people editing the same phone cannot silently overwrite each other
 - Create new config files from a template and upload them, or **clone** an existing phone:
   give it a MAC and an extension and everything else is copied
+- Add many phones at once from a pasted or uploaded list, checked before anything is written
 - **Replace** a phone whose hardware was swapped (new MAC, same config and history) or
   **delete** one that was retired; both can be undone from the change log
 
@@ -191,6 +192,31 @@ password, so give the new phone its own. The short name on line 1 follows the ne
 or display name if it mirrored the old one. Keys that point at the source phone itself (a BLF
 to its own extension, say) are copied as they are; adjust those in the Quick editor if needed.
 The new file is logged as *Created ... cloned from ...* and opened in the editor.
+
+## Adding phones from a list
+**Add Phones from a List** creates many phones in one go. Paste the list from a
+spreadsheet or load a CSV file:
+
+```
+mac,extension,name,password,station
+00:11:22:33:44:55,1001,Front Desk,s3cret-1,Front Desk - 1001
+00:11:22:33:44:56,1002,Kitchen,s3cret-2,Kitchen - 1002
+```
+
+- Only MAC and extension are required. With a header row the columns may come in any
+  order; without one the order is as above. Commas, tabs and semicolons all work, and a
+  MAC may be written in any notation.
+- Every phone is a copy of the source - the open phone, any phone on the PBX, or a saved
+  template - with line 1 pointed at its own extension, exactly as **Clone** does. A phone
+  source also passes on its phone model.
+- **Check List** reads the list and changes nothing. It reports lines that cannot be
+  created (not a MAC, no extension, a file that already exists, the same phone twice) and
+  warns about things worth a look (an extension already in use, no SIP password given).
+- **Create Phones** then writes only the lines that passed, as one job with progress, and
+  logs each as a created file. A list can hold up to 500 phones.
+
+Passwords in the list are sent to the app to be written into the configs; they are not
+kept anywhere else and never appear in the results or the change log.
 
 ## Drift report
 **Drift Report** compares phones against one you trust - the open phone, or any phone

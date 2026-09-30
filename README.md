@@ -79,7 +79,8 @@ not one in total, so work on one PBX never waits for another.
 ## Quick editor
 The editor has two tabs. **Quick** covers the changes you make most often without needing to
 know tag names or value syntax. **Advanced** is the original tag/value/attribute table,
-unchanged, for anything Quick does not cover.
+unchanged, for anything Quick does not cover. Phones open on Quick unless you choose
+Advanced under **Settings > Account > Editor**; the choice is kept with your account.
 
 Everything Quick writes can be applied to **the open phone** or to **the phones ticked in the
 XML Files list**. Bulk changes go through the same preview-then-confirm flow as

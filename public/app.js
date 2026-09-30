@@ -1105,6 +1105,7 @@ async function loadFile(name) {
   }
   updateQuickScopeHints();
 
+  showTab(preferredEditorTab());
   historyBtn.hidden = false;
   cloneBtn.hidden = false;
   clonePanel.hidden = true;
@@ -4141,6 +4142,11 @@ function updateQuickScopeHints() {
   quickWarningEl.hidden = problems.length === 0;
 }
 
+/** The tab the account asked for, Quick until it says otherwise. */
+function preferredEditorTab() {
+  return currentUser?.preferences?.editorTab === "advanced" ? "advanced" : "quick";
+}
+
 function showTab(which) {
   const quick = which === "quick";
   tabQuick.classList.toggle("is-active", quick);
@@ -4271,6 +4277,9 @@ function applyIdentity(user, token) {
   currentUser = user;
   csrfToken = token;
   document.body.classList.toggle("role-viewer", Boolean(user) && user.role === "viewer");
+  if (user) {
+    showTab(preferredEditorTab());
+  }
 
   const signedIn = Boolean(user);
   currentUserEl.hidden = !signedIn;
@@ -4625,12 +4634,27 @@ async function loadPasskeys() {
 }
 
 function renderAccountPanel() {
+  document.getElementById("acct-editor-tab").value = preferredEditorTab();
   const enrolled = Boolean(currentUser?.mfaEnrolled);
   document.getElementById("account-mfa-state").textContent = `Two-factor: ${enrolled ? "on" : "off"}`;
   document.getElementById("acct-enable-mfa").hidden = enrolled;
   document.getElementById("acct-disable-mfa").hidden = !enrolled;
   if (currentUser) loadPasskeys();
 }
+
+document.getElementById("acct-editor-tab").addEventListener("change", async (e) => {
+  try {
+    const data = await api("/api/auth/preferences", { method: "POST", body: JSON.stringify({ editorTab: e.target.value }) });
+    if (currentUser) {
+      currentUser.preferences = data.preferences;
+    }
+    showTab(preferredEditorTab());
+    setStatus(`Phones will open on the ${data.preferences.editorTab === "advanced" ? "Advanced" : "Quick"} tab.`);
+  } catch (error) {
+    setStatus(error.message, true);
+    e.target.value = preferredEditorTab();
+  }
+});
 
 document.getElementById("acct-enable-mfa").addEventListener("click", beginEnrolment);
 

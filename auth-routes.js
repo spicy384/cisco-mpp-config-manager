@@ -243,6 +243,15 @@ function createAuth({ dataDir }) {
 
   // --- identity resolution -------------------------------------------------
 
+  // Per-account settings for the interface. Unknown keys and values are dropped.
+  const EDITOR_TABS = new Set(["quick", "advanced"]);
+  function sanitizePreferences(input) {
+    const prefs = input && typeof input === "object" ? input : {};
+    return {
+      editorTab: EDITOR_TABS.has(prefs.editorTab) ? prefs.editorTab : "quick"
+    };
+  }
+
   function publicUser(user) {
     return user && {
       id: user.id,
@@ -250,6 +259,7 @@ function createAuth({ dataDir }) {
       role: user.role,
       mfaEnrolled: Boolean(user.totpSecret && user.mfaEnrolled),
       passkeys: (user.passkeys || []).length,
+      preferences: sanitizePreferences(user.preferences),
       createdAt: user.createdAt,
       lastLoginAt: user.lastLoginAt || null
     };
@@ -766,6 +776,19 @@ function createAuth({ dataDir }) {
 
     updateUser(user.id, { totpSecret: null, pendingTotpSecret: null, mfaEnrolled: false, recoveryCodes: [], lastTotpCounter: 0 });
     return res.json({ ok: true });
+  });
+
+  /** Interface preferences for the signed-in account. Only the keys sent are changed. */
+  router.post("/api/auth/preferences", requireAuth, (req, res) => {
+    const user = findUserById(req.user.id);
+    const current = sanitizePreferences(user.preferences);
+    const wanted = req.body && typeof req.body === "object" ? req.body : {};
+    if (wanted.editorTab !== undefined && !EDITOR_TABS.has(wanted.editorTab)) {
+      return res.status(400).json({ error: "editorTab must be quick or advanced." });
+    }
+    const preferences = sanitizePreferences({ ...current, ...wanted });
+    updateUser(user.id, { preferences });
+    return res.json({ ok: true, preferences });
   });
 
   router.post("/api/auth/password", requireAuth, (req, res) => {

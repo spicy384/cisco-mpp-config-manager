@@ -35,6 +35,7 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
   **delete** one that was retired; both can be undone from the change log
 
 **Bulk changes and history**
+- Compare every phone with a baseline and list the settings that have drifted
 - Find every phone whose config has a given tag or value - which phones still point at the old
   proxy, which have a BLF to extension 1001 - then tick the results for a bulk edit
 - Bulk edit one tag across many config files at once, preview-first, with live progress
@@ -190,6 +191,23 @@ password, so give the new phone its own. The short name on line 1 follows the ne
 or display name if it mirrored the old one. Keys that point at the source phone itself (a BLF
 to its own extension, say) are copied as they are; adjust those in the Quick editor if needed.
 The new file is logged as *Created ... cloned from ...* and opened in the editor.
+
+## Drift report
+**Drift Report** compares phones against one you trust - the open phone, or any phone
+picked from the list - and shows every setting where they differ, side by side with the
+baseline's value. Nothing is written.
+
+- *Compare these tags* narrows the comparison (`Proxy_*, Time_Zone`); blank compares
+  everything.
+- *Ignore these tags* starts with the ones that are meant to differ per phone - station
+  name, extensions, user IDs, passwords, display names and the programmable keys. Edit the
+  list to suit; clear it to ignore nothing.
+- Check every phone on the PBX, or only the ones ticked in the file list.
+- **Select Differing Phones** ticks the results, ready for a bulk edit to bring them back
+  in line.
+
+A tag present on one side and missing on the other counts as a difference, as does a
+different `ua` attribute. Password values show as `(hidden)`.
 
 ## Replacing and retiring a phone
 - **Replace** is for a phone that was swapped for a new unit. Open the phone, press

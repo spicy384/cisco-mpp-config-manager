@@ -512,6 +512,52 @@
       <div id="find-results" class="bulk-results"></div>
     </section>
 
+    <section class="panel" id="drift-panel">
+      <div class="panel-head">
+        <h2>Drift Report</h2>
+        <span id="drift-count" class="badge">Not run yet</span>
+      </div>
+      <p class="bulk-hint">
+        Compare phones against one you trust and list every setting that differs. Nothing is
+        written. Tags that are meant to differ per phone are ignored by default.
+      </p>
+
+      <div class="bulk-controls">
+        <label>Baseline phone
+          <select id="drift-baseline"><option value="">(the open phone)</option></select>
+        </label>
+        <label>Tags to compare (blank for all)
+          <input id="drift-include" placeholder="Proxy_*, Time_Zone, Upgrade_Rule" />
+        </label>
+        <label>Ignore these tags
+          <input id="drift-ignore" />
+        </label>
+        <label>Phones to check
+          <select id="drift-scope">
+            <option value="all">Every phone on the PBX</option>
+            <option value="selected">Only the ticked phones</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="actions">
+        <button id="drift-btn" type="button">Run Report</button>
+        <button id="drift-select-btn" type="button" class="secondary" hidden>Select Differing Phones</button>
+      </div>
+
+      <div id="drift-progress" class="bulk-progress" hidden>
+        <div class="bulk-progress-head">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="drift-progress-label">Comparing...</span>
+        </div>
+        <div class="progress-track">
+          <div id="drift-progress-bar" class="progress-bar"></div>
+        </div>
+      </div>
+
+      <div id="drift-results" class="bulk-results"></div>
+    </section>
+
     <section class="panel" id="bulk-panel">
       <div class="panel-head">
         <h2>Bulk Edit</h2>

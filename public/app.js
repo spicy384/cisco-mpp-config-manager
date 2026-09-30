@@ -102,6 +102,17 @@ const clonePasswordInput = document.getElementById("clone-password");
 const cloneStationInput = document.getElementById("clone-station");
 const cloneFilePreview = document.getElementById("clone-file-preview");
 const cloneCreateBtn = document.getElementById("clone-create-btn");
+const driftBaselineSelect = document.getElementById("drift-baseline");
+const driftIncludeInput = document.getElementById("drift-include");
+const driftIgnoreInput = document.getElementById("drift-ignore");
+const driftScopeSelect = document.getElementById("drift-scope");
+const driftBtn = document.getElementById("drift-btn");
+const driftSelectBtn = document.getElementById("drift-select-btn");
+const driftCountEl = document.getElementById("drift-count");
+const driftProgressEl = document.getElementById("drift-progress");
+const driftProgressLabelEl = document.getElementById("drift-progress-label");
+const driftProgressBarEl = document.getElementById("drift-progress-bar");
+const driftResultsEl = document.getElementById("drift-results");
 const findTagInput = document.getElementById("find-tag");
 const findValueInput = document.getElementById("find-value");
 const findModeSelect = document.getElementById("find-mode");
@@ -648,6 +659,7 @@ async function refreshFiles() {
   try {
     const data = await api("/api/files");
     allFiles = data.files || [];
+    populateDriftBaselines();
 
     // Drop selections for files that no longer exist on the server.
     const present = new Set(allFiles.map((file) => file.name));
@@ -2125,6 +2137,173 @@ deletePhoneBtn.addEventListener("click", () => {
   deleteOpenPhone().catch((error) => setStatus(error.message, true));
 });
 
+// --- drift report -----------------------------------------------------------------------
+
+let lastDrift = null;
+
+/** Keeps the baseline list in step with the phones on the PBX, preserving the choice. */
+function populateDriftBaselines() {
+  const previous = driftBaselineSelect.value;
+  driftBaselineSelect.replaceChildren();
+
+  const open = document.createElement("option");
+  open.value = "";
+  open.textContent = "(the open phone)";
+  driftBaselineSelect.appendChild(open);
+
+  for (const file of allFiles) {
+    const opt = document.createElement("option");
+    opt.value = file.name;
+    opt.textContent = file.stationDisplayName ? `${file.stationDisplayName} (${file.name})` : file.name;
+    driftBaselineSelect.appendChild(opt);
+  }
+  driftBaselineSelect.value = allFiles.some((f) => f.name === previous) ? previous : "";
+}
+
+async function loadDriftDefaults() {
+  const data = await api("/api/drift/defaults");
+  if (!driftIgnoreInput.value) {
+    driftIgnoreInput.value = (data.ignore || []).join(", ");
+  }
+}
+
+function setDriftBusy(busy) {
+  driftBtn.disabled = busy;
+  driftProgressEl.hidden = !busy;
+  if (busy) {
+    driftProgressBarEl.style.width = "0%";
+    driftProgressLabelEl.textContent = "Comparing...";
+  }
+}
+
+function updateDriftProgress(job) {
+  const total = job.total || 0;
+  const done = job.processed || 0;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  driftProgressBarEl.style.width = `${pct}%`;
+  driftProgressLabelEl.textContent = job.currentFile
+    ? `Comparing ${done + 1} of ${total}: ${job.currentFile}`
+    : `Comparing ${done} of ${total} (${pct}%)`;
+}
+
+function renderDriftResults(job) {
+  driftResultsEl.replaceChildren();
+  const differing = (job.results || []).filter((r) => r.status === "differs");
+  const errors = (job.results || []).filter((r) => r.status === "error");
+  const baseLabel = job.criteria?.baselineStation || job.criteria?.baseline || "the baseline";
+
+  driftCountEl.textContent = differing.length === 0
+    ? `All ${job.total || 0} phone${job.total === 1 ? "" : "s"} match ${baseLabel}`
+    : `${differing.length} of ${job.total} phone${job.total === 1 ? "" : "s"} differ from ${baseLabel}`;
+  if (errors.length) {
+    driftCountEl.textContent += `, ${errors.length} could not be read`;
+  }
+  driftSelectBtn.hidden = differing.length === 0;
+
+  if (differing.length === 0 && errors.length === 0) {
+    return;
+  }
+
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["Phone", "File", "Tag", `Baseline (${baseLabel})`, "This phone"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  const addRow = (cells, className) => {
+    const tr = document.createElement("tr");
+    tr.className = className;
+    for (const text of cells) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  };
+  const show = (value, missing) => (value == null ? missing : (value === "" ? "(empty)" : value));
+
+  for (const item of differing) {
+    for (const [i, d] of item.differences.entries()) {
+      // The phone is named on its first row only, so the table reads as groups.
+      addRow([
+        i === 0 ? (item.station || "-") : "",
+        i === 0 ? item.name : "",
+        d.tag,
+        show(d.baseline, "(not set)"),
+        show(d.value, "(not set)")
+      ], "bulk-row-changed");
+    }
+    if (item.matched > item.differences.length) {
+      addRow(["", "", `...and ${item.matched - item.differences.length} more`, "", ""], "bulk-row-changed");
+    }
+  }
+  for (const item of errors) {
+    addRow([item.station || "-", item.name, "Could not read", item.error || "", ""], "bulk-row-error");
+  }
+
+  table.appendChild(tbody);
+  driftResultsEl.appendChild(table);
+}
+
+async function runDrift() {
+  const baseline = driftBaselineSelect.value || currentFile;
+  if (!baseline) {
+    setStatus("Choose a baseline phone, or open one first.", true);
+    return;
+  }
+
+  const request = { baseline, include: driftIncludeInput.value, ignore: driftIgnoreInput.value };
+  if (driftScopeSelect.value === "selected") {
+    if (selectedFiles.size === 0) {
+      setStatus("Tick the phones to check in the XML Files list first.", true);
+      return;
+    }
+    request.fileNames = [...selectedFiles];
+  }
+
+  const start = await api("/api/drift", { method: "POST", body: JSON.stringify(request) });
+  setDriftBusy(true);
+  let job;
+  try {
+    job = await pollJob(start.jobId, updateDriftProgress);
+  } finally {
+    setDriftBusy(false);
+  }
+
+  lastDrift = { request, job };
+  renderDriftResults(job);
+  const differing = job.results.filter((r) => r.status === "differs").length;
+  setStatus(differing
+    ? `${differing} phone${differing === 1 ? "" : "s"} differ${differing === 1 ? "s" : ""} from the baseline.`
+    : "Every phone checked matches the baseline.");
+}
+
+function selectDriftingPhones() {
+  if (!lastDrift) {
+    return;
+  }
+  const names = lastDrift.job.results.filter((r) => r.status === "differs").map((r) => r.name);
+  selectedFiles.clear();
+  for (const name of names) {
+    selectedFiles.add(name);
+  }
+  renderFileList(getFilteredFiles());
+  onSelectionChanged();
+  setStatus(`Selected ${names.length} phone${names.length === 1 ? "" : "s"} for bulk edit.`);
+  document.getElementById("bulk-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+driftBtn.addEventListener("click", () => {
+  runDrift().catch((error) => setStatus(error.message, true));
+});
+driftSelectBtn.addEventListener("click", selectDriftingPhones);
+
 // --- find in all configs ------------------------------------------------------------
 
 let lastFind = null;
@@ -3123,6 +3302,7 @@ tabQuick.addEventListener("click", () => showTab("quick"));
 tabAdvanced.addEventListener("click", () => showTab("advanced"));
 
 async function loadQuickSchema() {
+  loadDriftDefaults().catch(() => {});
   quickSchemaData = await api("/api/quick/schema");
   populateModelSelect(quickModelSelect, { allowBlank: false });
   populateModelSelect(profileModelSelect, { allowBlank: true });

@@ -1198,6 +1198,119 @@ async function runSearchJob(job) {
   job.currentFile = null;
 }
 
+// --- drift report -------------------------------------------------------------------
+// Tags that are meant to differ from phone to phone, so they are left out of a
+// comparison unless the caller says otherwise.
+const DEFAULT_DRIFT_IGNORE = [
+  "Station_Display_Name", "Station_Name",
+  "Extension_*", "User_ID_*", "Auth_ID_*", "Password_*", "Display_Name_*", "Short_Name_*",
+  "Extended_Function_*"
+];
+const MAX_DRIFT_DIFFERENCES_PER_FILE = 40;
+
+/** "A, B_*  C" -> ["A", "B_*", "C"]. Commas, semicolons and whitespace all separate. */
+function parseTagList(text) {
+  if (Array.isArray(text)) {
+    return text.map((t) => String(t).trim()).filter(Boolean);
+  }
+  return String(text == null ? "" : text).split(/[\s,;]+/).map((t) => t.trim()).filter(Boolean);
+}
+
+/** A test for "is this tag named by any of these patterns" (case-insensitive, * wildcard). */
+function buildTagMatcher(patterns) {
+  const list = parseTagList(patterns);
+  if (list.length > 200) {
+    throw new Error("Too many tag patterns (200 at most).");
+  }
+  const tests = list.map((pattern) => {
+    if (pattern.length > MAX_SEARCH_PATTERN_LENGTH) {
+      throw new Error(`Tag patterns are limited to ${MAX_SEARCH_PATTERN_LENGTH} characters.`);
+    }
+    return new RegExp(`^${pattern.split("*").map(escapeRegex).join(".*")}$`, "i");
+  });
+  const matcher = (key) => tests.some((re) => re.test(key));
+  matcher.patterns = list;
+  return matcher;
+}
+
+/**
+ * How one phone's config differs from a baseline's, limited to the tags asked for
+ * (all of them when `include` is empty) and leaving out the ignored ones.
+ */
+function compareToBaseline(baselineEntries, entries, { include, ignore } = {}) {
+  const wanted = include && include.patterns.length ? include : null;
+  return diffEntriesForLog(baselineEntries, entries)
+    .filter((change) => (!wanted || wanted(change.key)) && !(ignore && ignore(change.key)))
+    .map((change) => ({ tag: change.key, baseline: change.before, value: change.after }));
+}
+
+/** Read-only: every phone compared against one baseline phone. */
+async function runDriftJob(job) {
+  const { criteria, remoteDir, fileNames: requested } = job.request;
+  const include = buildTagMatcher(criteria.include);
+  const ignore = buildTagMatcher(criteria.ignore);
+
+  ensureConnected();
+  if (!(await sftp.exists(path.posix.join(remoteDir, criteria.baseline)))) {
+    throw new Error(`Baseline file not found: ${criteria.baseline}`);
+  }
+  const baseContent = await sftp.get(path.posix.join(remoteDir, criteria.baseline));
+  const baselineEntries = xmlToEntries(Buffer.isBuffer(baseContent) ? baseContent.toString("utf8") : String(baseContent)).entries;
+  criteria.baselineStation = findStationDisplayNameInEntries(baselineEntries);
+
+  let fileNames = requested;
+  if (!fileNames) {
+    const remoteList = await sftp.list(remoteDir);
+    fileNames = remoteList
+      .filter((item) => item.type !== "d" && /^spa.*\.xml$/i.test(item.name))
+      .map((item) => item.name)
+      .sort((a, b) => a.localeCompare(b));
+  }
+  fileNames = fileNames.filter((name) => name !== criteria.baseline);
+
+  job.total = fileNames.length;
+  job.unmatched = 0;
+
+  for (const fileName of fileNames) {
+    job.currentFile = fileName;
+    ensureConnected();
+    try {
+      const content = await sftp.get(path.posix.join(remoteDir, fileName));
+      const { entries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
+      const differences = compareToBaseline(baselineEntries, entries, { include, ignore });
+
+      if (differences.length === 0) {
+        job.unmatched += 1;
+        continue;
+      }
+
+      const redact = (tag, value) => (value && isSensitiveTag(tag) ? REDACTED : value);
+      job.results.push({
+        name: fileName,
+        station: findStationDisplayNameInEntries(entries),
+        status: "differs",
+        matched: differences.length,
+        differences: differences.slice(0, MAX_DRIFT_DIFFERENCES_PER_FILE).map((d) => ({
+          tag: d.tag,
+          baseline: redact(d.tag, d.baseline),
+          value: redact(d.tag, d.value)
+        }))
+      });
+    } catch (error) {
+      job.results.push({
+        name: fileName,
+        station: fileMetadataCache.get(buildCacheKey(fileName))?.stationDisplayName || "",
+        status: "error",
+        error: error.message
+      });
+    } finally {
+      job.processed += 1;
+    }
+  }
+
+  job.currentFile = null;
+}
+
 function bulkJobIsRunning() {
   const running = activeBulkJobId && bulkJobs.get(activeBulkJobId);
   return Boolean(running && running.status === "running");
@@ -1580,6 +1693,66 @@ app.post("/api/search", (req, res) => {
   } catch (error) {
     return sendError(res, error);
   }
+});
+
+// Compares every phone (or the ones named) with a baseline phone. Read-only, so any
+// signed-in role may run it.
+app.post("/api/drift", (req, res) => {
+  try {
+    ensureConnected();
+    pruneBulkJobs();
+
+    let baseline;
+    let fileNames = null;
+    let ignoreList;
+    try {
+      baseline = sanitizeFileName(String(req.body?.baseline || ""));
+      // Absent means the usual per-phone tags; an empty list means ignore nothing.
+      ignoreList = req.body?.ignore === undefined ? DEFAULT_DRIFT_IGNORE : parseTagList(req.body.ignore);
+      buildTagMatcher(req.body?.include);
+      buildTagMatcher(ignoreList);
+      if (Array.isArray(req.body?.fileNames) && req.body.fileNames.length > 0) {
+        fileNames = req.body.fileNames.map((name) => sanitizeFileName(name));
+      }
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
+    if (bulkJobIsRunning()) {
+      return res.status(409).json({ error: "A bulk edit is already running. Wait for it to finish." });
+    }
+
+    const job = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      status: "running",
+      dryRun: true,
+      key: baseline,
+      mode: "drift",
+      editCount: 0,
+      total: 0,
+      processed: 0,
+      currentFile: null,
+      results: [],
+      startedAt: Date.now(),
+      finishedAt: null,
+      error: null,
+      request: {
+        criteria: { baseline, baselineStation: "", include: parseTagList(req.body?.include), ignore: ignoreList },
+        fileNames,
+        remoteDir: connection.remoteDir,
+        scope: buildLogScope(connection),
+        user: req.user ? req.user.username : ""
+      }
+    };
+
+    launchJob(job, runDriftJob);
+    return res.status(202).json({ jobId: job.id, dryRun: true });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+app.get("/api/drift/defaults", (req, res) => {
+  res.json({ ignore: DEFAULT_DRIFT_IGNORE });
 });
 
 // Undoes a completed apply as one job, so the same progress UI applies.
@@ -2660,6 +2833,10 @@ module.exports = {
   applyBulkEdit,
   buildSearchCriteria,
   matchEntries,
+  parseTagList,
+  buildTagMatcher,
+  compareToBaseline,
+  DEFAULT_DRIFT_IGNORE,
   buildClonedEntries,
   entriesToXml,
   extractStationDisplayName,

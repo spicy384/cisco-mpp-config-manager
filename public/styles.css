@@ -498,8 +498,65 @@ body.theme-dark .icon-moon { display: inline; }
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 22%, transparent);
 }
 
-#connection-panel.collapsed {
+/* The connection bar sits above every page. */
+#connection-panel {
   padding: 12px 16px;
+}
+
+.quick-connect {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.quick-connect select {
+  width: auto;
+  min-width: 220px;
+  max-width: 100%;
+}
+
+.quick-connect input {
+  width: 180px;
+}
+
+.conn-dot.is-off {
+  background: var(--border-strong);
+  box-shadow: none;
+}
+
+/* Pages: one is shown at a time, laid out like main itself. */
+.page {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.page-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: auto;
+  margin-left: 18px;
+}
+
+.page-link {
+  padding: 7px 12px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 13.5px;
+  font-weight: 550;
+  text-decoration: none;
+}
+
+.page-link:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.page-link.is-active {
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary);
 }
 
 #status {
@@ -1149,25 +1206,10 @@ form[hidden],
   display: none !important;
 }
 
-#connection-panel.collapsed #connect-form,
-/* The status line is the app's only feedback channel, so it stays visible when the
-   panel collapses after connecting; it just sits tighter under the summary row. */
-#connection-panel.collapsed #status {
+/* The status line is the app's main feedback channel, so it is on every page. */
+#connection-panel #status {
   margin-top: 10px;
   padding: 7px 10px;
-}
-
-#connection-panel.collapsed #connection-summary {
-  display: flex !important;
-}
-
-#connection-panel.collapsed .panel-head {
-  display: none;
-}
-
-body.connection-collapsed #connection-panel {
-  width: fit-content;
-  margin-right: auto;
 }
 
 ::selection {
@@ -1425,6 +1467,7 @@ body.auth-locked {
 
 body.auth-locked main,
 body.auth-locked header .brand,
+body.auth-locked .page-nav,
 body.auth-locked .header-actions {
   filter: blur(2px);
   pointer-events: none;

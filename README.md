@@ -3,6 +3,19 @@
 Small web app to connect to FreePBX over SFTP, list Cisco MPP `.xml` config files, view and
 edit fields, and upload saved or new configs. Runs as a container on a management server.
 
+## Finding your way around
+The app has three pages, reached from the links in the header. Each has its own address
+(`#configuration`, `#reporting`, `#settings`), so Back, reload and bookmarks work.
+
+| Page | What is on it |
+|---|---|
+| **Configuration** | The phone list and editor, Bulk Edit, Add Phones from a List |
+| **Reporting** | Find in Configs, Drift Report, the Change Log |
+| **Settings** | PBX Servers, Users (administrators), Account |
+
+The bar under the header is on every page. It shows which PBX you are connected to, or a
+saved-server list and password box to connect with, and the latest status message.
+
 ## Features
 **Accounts**
 - Sign-in with per-user accounts, optional TOTP two-factor and single-use recovery codes
@@ -25,7 +38,7 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
 - Every result is shown as a notification pinned to the window, so it is visible wherever
   you are on the page; errors stay until dismissed
 - A dropped PBX connection is noticed and reported as such - keepalives catch a dead session
-  within about 45 seconds - and the page returns to the connect form with the open phone and
+  within about 45 seconds - and the connection bar asks for the password again, with the open phone and
   any unsaved edits intact, so reconnecting carries on where you left off
 - A save is refused if the file changed on the PBX since it was opened, naming the last
   writer, so two people editing the same phone cannot silently overwrite each other
@@ -384,7 +397,7 @@ If the PBX returns something else the badge says *Status unavailable* and hoveri
 what the PBX printed.
 
 ### If resync does not work
-Use **Test Resync** in the Connection panel while connected: it runs the command for an
+Use **Test Resync** under **Settings > PBX Servers** while connected: it runs the command for an
 extension you type and shows exactly what the PBX printed. The usual causes:
 
 - **The SSH user cannot run `asterisk`.** Connecting as `root` works out of the box.
@@ -523,7 +536,7 @@ offers to enrol two-factor straight away.
   them - they are stored hashed and cannot be recovered, only regenerated.
 - **A used TOTP code cannot be replayed**, including the one used to enrol. If you enrol
   and immediately sign out, wait for the next code.
-- **Passkeys**: anyone can add passkeys under **Account** (a phone, a laptop, a hardware
+- **Passkeys**: anyone can add passkeys under **Settings > Account** (a phone, a laptop, a hardware
   key; up to ten) and then use **Sign in with a passkey** on the sign-in card. No username,
   password or code is asked for: the passkey needs the device plus a fingerprint, face or
   PIN, which is the same two-factor guarantee TOTP gives the password path. The password
@@ -545,14 +558,14 @@ offers to enrol two-factor straight away.
 | Viewer | Connect to a PBX and look: open phones, preview a bulk edit, read history and the change log. Cannot change anything on the PBX or in the app |
 
 Roles are enforced by the server on every request, not just hidden in the interface. An
-administrator sets a role when adding an account and can change it later from **Users**;
+administrator sets a role when adding an account and can change it later from **Settings > Users**;
 nobody can change their own role, and the last administrator cannot be demoted.
 
 Every write records **which user made it** in the Change Log. Entries written before
 authentication existed show `-`.
 
 ### If someone loses their authenticator
-An administrator opens **Users** and clicks **Reset MFA**. That user can then sign in with
+An administrator opens **Settings > Users** and clicks **Reset MFA**. That user can then sign in with
 their password alone and enrol again. If the *only* administrator is locked out, stop the
 container, edit `users.json` in the data directory, set `"mfaEnrolled": false` and
 `"totpSecret": null` on that account, and start it again.

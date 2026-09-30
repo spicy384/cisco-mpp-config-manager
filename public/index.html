@@ -21,10 +21,14 @@
         </div>
       </div>
 
+      <nav id="page-nav" class="page-nav" aria-label="Pages">
+        <a href="#configuration" class="page-link" data-page="configuration">Configuration</a>
+        <a href="#reporting" class="page-link" data-page="reporting">Reporting</a>
+        <a href="#settings" class="page-link" data-page="settings">Settings</a>
+      </nav>
+
       <div class="header-actions">
         <span id="current-user" class="badge" hidden></span>
-        <button id="account-btn" type="button" class="secondary small" hidden>Account</button>
-        <button id="users-btn" type="button" class="secondary small" hidden>Users</button>
         <button id="logout-btn" type="button" class="secondary small" hidden>Sign out</button>
       <button id="theme-toggle" type="button" class="secondary icon-btn">
         <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
@@ -127,74 +131,23 @@
 
   <main>
     <section class="panel" id="connection-panel">
-      <div class="panel-head">
-        <h2>Connection</h2>
-      </div>
-
       <div id="connection-summary" class="connection-summary" hidden>
         <span class="conn-dot" aria-hidden="true"></span>
         <strong id="connected-server-name">Connected</strong>
         <span id="connected-fingerprint" class="fingerprint" title="SSH host key fingerprint"></span>
-        <button type="button" id="expand-connection-btn" class="secondary small">Expand</button>
+        <button type="button" id="expand-connection-btn" class="secondary small">Servers</button>
         <button type="button" id="disconnect-mini-btn" class="secondary small writer-only">Disconnect</button>
       </div>
 
-      <form id="connect-form">
-        <label>Saved PBX Servers
-          <select id="server-select" name="profileId">
-            <option value="">(Direct connection / no saved server selected)</option>
-          </select>
-        </label>
-
-        <label>Server Name (for save)
-          <input id="server-name" placeholder="Main FreePBX" />
-        </label>
-
-        <div class="three-col">
-          <label>Host <input name="host" placeholder="192.168.1.10" /></label>
-          <label>Port <input name="port" type="number" value="22" /></label>
-          <label>Username <input name="username" placeholder="root" /></label>
-        </div>
-
-        <label>Password (required to connect) <input name="password" type="password" required /></label>
-        <label>Remote XML Directory <input name="remoteDir" placeholder="/tftpboot" /></label>
-        <label>SIP Server for speed dial / BLF (optional)
-          <input id="sip-server" placeholder="pbx.example.com:5060" />
-        </label>
-        <label>Resync command (optional - runs on the PBX over SSH; {ext} is the phone's line 1 extension)
-          <input id="resync-command" placeholder='asterisk -rx "pjsip send notify cisco-check-cfg endpoint {ext}"' />
-        </label>
-        <div class="resync-test">
-          <label>Test resync while connected
-            <input id="resync-test-ext" placeholder="1001" />
-          </label>
-          <button type="button" id="resync-test-btn" class="secondary writer-only">Test Resync</button>
-        </div>
-        <pre id="resync-test-output" class="resync-output" hidden></pre>
-        <label>Registration status command (optional - lists registered phones; blank for PJSIP)
-          <input id="status-command" placeholder='asterisk -rx "pjsip show contacts"' />
-        </label>
-        <div class="three-col">
-          <label>Default phone model (for phones without one set)
-            <select id="profile-model"><option value="">(app default)</option></select>
-          </label>
-          <label id="profile-kems-label" hidden>Expansion modules
-            <select id="profile-kems"></select>
-          </label>
-          <label id="profile-custom-label" hidden>Line keys
-            <input id="profile-custom-keys" type="number" min="1" max="100" value="10" />
-          </label>
-        </div>
-
-        <div class="actions">
-          <button type="submit">Connect</button>
-          <button type="button" id="save-server-btn" class="secondary writer-only">Save Server</button>
-          <button type="button" id="disconnect-btn" class="secondary writer-only">Disconnect</button>
-          <button type="button" id="collapse-connection-btn" class="secondary" hidden>Collapse</button>
-          <span class="actions-spacer"></span>
-          <button type="button" id="delete-server-btn" class="ghost-danger writer-only">Delete Server</button>
-        </div>
+      <form id="quick-connect-form" class="quick-connect">
+        <span class="conn-dot is-off" aria-hidden="true"></span>
+        <strong>Not connected</strong>
+        <select id="quick-server" aria-label="Saved PBX server"></select>
+        <input id="quick-password" type="password" placeholder="Password" aria-label="Password" autocomplete="off" />
+        <button type="submit">Connect</button>
+        <button type="button" id="manage-servers-btn" class="secondary">Manage Servers</button>
       </form>
+
 
       <div id="host-key-warning" class="host-key-warning" role="alert" hidden>
         <strong>SSH host key changed</strong>
@@ -220,6 +173,7 @@
       <p id="status" role="status">Not connected</p>
     </section>
 
+    <div class="page" id="page-configuration" data-page="configuration" aria-label="Configuration" hidden>
     <section class="panel grid-two">
       <div class="col-files">
         <div class="panel-head">
@@ -472,92 +426,6 @@
       </div>
     </section>
 
-    <section class="panel" id="find-panel">
-      <div class="panel-head">
-        <h2>Find in Configs</h2>
-        <span id="find-count" class="badge">Not searched yet</span>
-      </div>
-      <p class="bulk-hint">
-        Search every phone config on the PBX for a tag, a value, or both. Nothing is written.
-        <strong>Select Matching Phones</strong> ticks the results in the list, ready for a bulk edit.
-      </p>
-
-      <div class="bulk-controls">
-        <label>Tag (optional; * matches anything) <input id="find-tag" placeholder="Extended_Function_*" /></label>
-        <label>Value (optional) <input id="find-value" placeholder="sub=1001@" /></label>
-        <label>Match
-          <select id="find-mode">
-            <option value="contains">Contains (ignores case)</option>
-            <option value="exact">Exactly</option>
-            <option value="regex">Regular expression</option>
-          </select>
-        </label>
-      </div>
-
-      <div class="actions">
-        <button id="find-btn" type="button">Find</button>
-        <button id="find-select-btn" type="button" class="secondary" hidden>Select Matching Phones</button>
-      </div>
-
-      <div id="find-progress" class="bulk-progress" hidden>
-        <div class="bulk-progress-head">
-          <span class="spinner" aria-hidden="true"></span>
-          <span id="find-progress-label">Searching...</span>
-        </div>
-        <div class="progress-track">
-          <div id="find-progress-bar" class="progress-bar"></div>
-        </div>
-      </div>
-
-      <div id="find-results" class="bulk-results"></div>
-    </section>
-
-    <section class="panel" id="drift-panel">
-      <div class="panel-head">
-        <h2>Drift Report</h2>
-        <span id="drift-count" class="badge">Not run yet</span>
-      </div>
-      <p class="bulk-hint">
-        Compare phones against one you trust and list every setting that differs. Nothing is
-        written. Tags that are meant to differ per phone are ignored by default.
-      </p>
-
-      <div class="bulk-controls">
-        <label>Baseline phone
-          <select id="drift-baseline"><option value="">(the open phone)</option></select>
-        </label>
-        <label>Tags to compare (blank for all)
-          <input id="drift-include" placeholder="Proxy_*, Time_Zone, Upgrade_Rule" />
-        </label>
-        <label>Ignore these tags
-          <input id="drift-ignore" />
-        </label>
-        <label>Phones to check
-          <select id="drift-scope">
-            <option value="all">Every phone on the PBX</option>
-            <option value="selected">Only the ticked phones</option>
-          </select>
-        </label>
-      </div>
-
-      <div class="actions">
-        <button id="drift-btn" type="button">Run Report</button>
-        <button id="drift-select-btn" type="button" class="secondary" hidden>Select Differing Phones</button>
-      </div>
-
-      <div id="drift-progress" class="bulk-progress" hidden>
-        <div class="bulk-progress-head">
-          <span class="spinner" aria-hidden="true"></span>
-          <span id="drift-progress-label">Comparing...</span>
-        </div>
-        <div class="progress-track">
-          <div id="drift-progress-bar" class="progress-bar"></div>
-        </div>
-      </div>
-
-      <div id="drift-results" class="bulk-results"></div>
-    </section>
-
     <section class="panel" id="bulk-panel">
       <div class="panel-head">
         <h2>Bulk Edit</h2>
@@ -656,6 +524,94 @@
 
       <div id="provision-results" class="bulk-results"></div>
     </section>
+    </div>
+
+    <div class="page" id="page-reporting" data-page="reporting" aria-label="Reporting" hidden>
+    <section class="panel" id="find-panel">
+      <div class="panel-head">
+        <h2>Find in Configs</h2>
+        <span id="find-count" class="badge">Not searched yet</span>
+      </div>
+      <p class="bulk-hint">
+        Search every phone config on the PBX for a tag, a value, or both. Nothing is written.
+        <strong>Select Matching Phones</strong> ticks the results in the list, ready for a bulk edit.
+      </p>
+
+      <div class="bulk-controls">
+        <label>Tag (optional; * matches anything) <input id="find-tag" placeholder="Extended_Function_*" /></label>
+        <label>Value (optional) <input id="find-value" placeholder="sub=1001@" /></label>
+        <label>Match
+          <select id="find-mode">
+            <option value="contains">Contains (ignores case)</option>
+            <option value="exact">Exactly</option>
+            <option value="regex">Regular expression</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="actions">
+        <button id="find-btn" type="button">Find</button>
+        <button id="find-select-btn" type="button" class="secondary" hidden>Select Matching Phones</button>
+      </div>
+
+      <div id="find-progress" class="bulk-progress" hidden>
+        <div class="bulk-progress-head">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="find-progress-label">Searching...</span>
+        </div>
+        <div class="progress-track">
+          <div id="find-progress-bar" class="progress-bar"></div>
+        </div>
+      </div>
+
+      <div id="find-results" class="bulk-results"></div>
+    </section>
+
+    <section class="panel" id="drift-panel">
+      <div class="panel-head">
+        <h2>Drift Report</h2>
+        <span id="drift-count" class="badge">Not run yet</span>
+      </div>
+      <p class="bulk-hint">
+        Compare phones against one you trust and list every setting that differs. Nothing is
+        written. Tags that are meant to differ per phone are ignored by default.
+      </p>
+
+      <div class="bulk-controls">
+        <label>Baseline phone
+          <select id="drift-baseline"><option value="">(the open phone)</option></select>
+        </label>
+        <label>Tags to compare (blank for all)
+          <input id="drift-include" placeholder="Proxy_*, Time_Zone, Upgrade_Rule" />
+        </label>
+        <label>Ignore these tags
+          <input id="drift-ignore" />
+        </label>
+        <label>Phones to check
+          <select id="drift-scope">
+            <option value="all">Every phone on the PBX</option>
+            <option value="selected">Only the ticked phones</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="actions">
+        <button id="drift-btn" type="button">Run Report</button>
+        <button id="drift-select-btn" type="button" class="secondary" hidden>Select Differing Phones</button>
+      </div>
+
+      <div id="drift-progress" class="bulk-progress" hidden>
+        <div class="bulk-progress-head">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="drift-progress-label">Comparing...</span>
+        </div>
+        <div class="progress-track">
+          <div id="drift-progress-bar" class="progress-bar"></div>
+        </div>
+      </div>
+
+      <div id="drift-results" class="bulk-results"></div>
+    </section>
 
     <section class="panel" id="log-panel">
       <div class="panel-head">
@@ -680,6 +636,74 @@
       </div>
 
       <div id="log-results" class="bulk-results"></div>
+    </section>
+    </div>
+
+    <div class="page" id="page-settings" data-page="settings" aria-label="Settings" hidden>
+    <section class="panel" id="servers-panel">
+      <div class="panel-head">
+        <h2>PBX Servers</h2>
+      </div>
+      <p class="bulk-hint">
+        A saved server keeps everything about a PBX except its password. Choose one to edit it,
+        or fill in the fields for a new one. Connect from the bar at the top of any page, or here.
+      </p>
+
+      <form id="connect-form">
+        <label>Saved PBX Servers
+          <select id="server-select" name="profileId">
+            <option value="">(Direct connection / no saved server selected)</option>
+          </select>
+        </label>
+
+        <label>Server Name (for save)
+          <input id="server-name" placeholder="Main FreePBX" />
+        </label>
+
+        <div class="three-col">
+          <label>Host <input name="host" placeholder="192.168.1.10" /></label>
+          <label>Port <input name="port" type="number" value="22" /></label>
+          <label>Username <input name="username" placeholder="root" /></label>
+        </div>
+
+        <label>Password (only needed to connect from here) <input name="password" type="password" autocomplete="off" /></label>
+        <label>Remote XML Directory <input name="remoteDir" placeholder="/tftpboot" /></label>
+        <label>SIP Server for speed dial / BLF (optional)
+          <input id="sip-server" placeholder="pbx.example.com:5060" />
+        </label>
+        <label>Resync command (optional - runs on the PBX over SSH; {ext} is the phone's line 1 extension)
+          <input id="resync-command" placeholder='asterisk -rx "pjsip send notify cisco-check-cfg endpoint {ext}"' />
+        </label>
+        <div class="resync-test">
+          <label>Test resync while connected
+            <input id="resync-test-ext" placeholder="1001" />
+          </label>
+          <button type="button" id="resync-test-btn" class="secondary writer-only">Test Resync</button>
+        </div>
+        <pre id="resync-test-output" class="resync-output" hidden></pre>
+        <label>Registration status command (optional - lists registered phones; blank for PJSIP)
+          <input id="status-command" placeholder='asterisk -rx "pjsip show contacts"' />
+        </label>
+        <div class="three-col">
+          <label>Default phone model (for phones without one set)
+            <select id="profile-model"><option value="">(app default)</option></select>
+          </label>
+          <label id="profile-kems-label" hidden>Expansion modules
+            <select id="profile-kems"></select>
+          </label>
+          <label id="profile-custom-label" hidden>Line keys
+            <input id="profile-custom-keys" type="number" min="1" max="100" value="10" />
+          </label>
+        </div>
+
+        <div class="actions">
+          <button type="submit">Connect</button>
+          <button type="button" id="save-server-btn" class="secondary writer-only">Save Server</button>
+          <button type="button" id="disconnect-btn" class="secondary writer-only">Disconnect</button>
+          <span class="actions-spacer"></span>
+          <button type="button" id="delete-server-btn" class="ghost-danger writer-only">Delete Server</button>
+        </div>
+      </form>
     </section>
 
     <section class="panel" id="users-panel" hidden>
@@ -751,6 +775,7 @@
         </div>
       </div>
     </section>
+    </div>
   </main>
 
   <!-- Status messages repeated where they can be seen from anywhere on the page. -->

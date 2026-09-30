@@ -4,7 +4,10 @@ const connectionSummary = document.getElementById("connection-summary");
 const connectedServerNameEl = document.getElementById("connected-server-name");
 const connectForm = document.getElementById("connect-form");
 const disconnectBtn = document.getElementById("disconnect-btn");
-const collapseConnectionBtn = document.getElementById("collapse-connection-btn");
+const quickConnectForm = document.getElementById("quick-connect-form");
+const quickServerSelect = document.getElementById("quick-server");
+const quickPasswordInput = document.getElementById("quick-password");
+const manageServersBtn = document.getElementById("manage-servers-btn");
 const disconnectMiniBtn = document.getElementById("disconnect-mini-btn");
 const connectedFingerprintEl = document.getElementById("connected-fingerprint");
 const hostKeyWarning = document.getElementById("host-key-warning");
@@ -277,15 +280,16 @@ function applyTheme(theme) {
   localStorage.setItem("pbx-theme", currentTheme);
 }
 
+/**
+ * Switches the bar at the top of every page between "connected to X" and the quick
+ * connect controls. (The name predates the pages: the bar used to be a collapsible panel.)
+ */
 function setConnectionCollapsed(collapsed, connectionData = null) {
   const info = connectionData || lastConnectionInfo;
 
-  connectForm.hidden = collapsed;
   connectionSummary.hidden = !collapsed;
-  collapseConnectionBtn.hidden = collapsed;
-
-  connectionPanel.classList.toggle("collapsed", collapsed);
-  document.body.classList.toggle("connection-collapsed", collapsed);
+  quickConnectForm.hidden = collapsed;
+  document.body.classList.toggle("pbx-connected", collapsed);
 
   if (collapsed) {
     const selectedLabel = serverSelect.options[serverSelect.selectedIndex]?.text || "";
@@ -601,6 +605,22 @@ function renderServerOptions() {
   });
 
   serverSelect.value = servers.some((s) => s.id === selected) ? selected : "";
+
+  const quickSelected = quickServerSelect.value;
+  quickServerSelect.replaceChildren();
+  const prompt = document.createElement("option");
+  prompt.value = "";
+  prompt.textContent = servers.length ? "Choose a saved server..." : "No saved servers yet";
+  quickServerSelect.appendChild(prompt);
+  for (const server of servers) {
+    const option = document.createElement("option");
+    option.value = server.id;
+    option.textContent = `${server.name} (${server.host})`;
+    quickServerSelect.appendChild(option);
+  }
+  quickServerSelect.value = servers.some((s) => s.id === quickSelected)
+    ? quickSelected
+    : (servers.length === 1 ? servers[0].id : "");
 }
 
 function renderTemplateOptions() {
@@ -2496,7 +2516,7 @@ function selectDriftingPhones() {
   renderFileList(getFilteredFiles());
   onSelectionChanged();
   setStatus(`Selected ${names.length} phone${names.length === 1 ? "" : "s"} for bulk edit.`);
-  document.getElementById("bulk-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+  showPage("configuration", "bulk-panel");
 }
 
 driftBtn.addEventListener("click", () => {
@@ -2628,7 +2648,7 @@ function selectFoundPhones() {
     bulkKeyInput.value = lastFind.criteria.tag;
   }
   setStatus(`Selected ${names.length} phone${names.length === 1 ? "" : "s"} for bulk edit.`);
-  document.getElementById("bulk-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+  showPage("configuration", "bulk-panel");
 }
 
 findBtn.addEventListener("click", () => {
@@ -2708,14 +2728,34 @@ async function clearCurrentLog() {
   setStatus(`Cleared ${data.cleared} log entr${data.cleared === 1 ? "y" : "ies"} for ${label}.`);
 }
 
-connectForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
+// What was last sent to connect, so "forget the host key and reconnect" can repeat it.
+let lastConnectBody = null;
 
-  const body = Object.fromEntries(new FormData(connectForm).entries());
+connectForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  connectToPbx(Object.fromEntries(new FormData(connectForm).entries()));
+});
+
+quickConnectForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  if (!quickServerSelect.value) {
+    setStatus("Choose a saved server, or add one under Settings.", true);
+    return;
+  }
+  connectToPbx({ profileId: quickServerSelect.value, password: quickPasswordInput.value });
+});
+
+manageServersBtn.addEventListener("click", () => {
+  showPage("settings", "servers-panel");
+});
+
+/** Connects with the given form values; used by the bar and by the Settings form alike. */
+async function connectToPbx(body) {
   if (!body.password) {
     setStatus("Password is required to connect.", true);
     return;
   }
+  lastConnectBody = { ...body };
 
   // Connecting to a different PBX replaces the open phone; the same one keeps it.
   const targetKey = connectionKeyOf({ profileId: body.profileId, host: (body.host || "").trim(), remoteDir: (body.remoteDir || "").trim() });
@@ -2756,6 +2796,14 @@ connectForm.addEventListener("submit", async (e) => {
       setPhoneModelChoice(null, null);
     }
 
+    // Passwords are not left sitting in the page once they have done their job.
+    lastConnectBody = null;
+    connectForm.elements.password.value = "";
+    quickPasswordInput.value = "";
+    if (data.connection?.profileId) {
+      quickServerSelect.value = data.connection.profileId;
+    }
+
     const hostKey = data.connection?.hostKey;
     setStatus(hostKey?.status === "new"
       ? `${data.message || "Connected"}. First connection: host key ${hostKey.fingerprint} has been remembered.`
@@ -2769,7 +2817,7 @@ connectForm.addEventListener("submit", async (e) => {
     }
     setStatus(error.message, true);
   }
-});
+}
 
 forgetHostKeyBtn.addEventListener("click", async () => {
   const details = pendingHostKeyMismatch;
@@ -2791,8 +2839,10 @@ forgetHostKeyBtn.addEventListener("click", async () => {
       body: JSON.stringify({ host: details.host, port: details.port })
     });
     hideHostKeyWarning();
-    // The password is still in the form, so reconnecting is a re-submit.
-    connectForm.requestSubmit();
+    // Repeat the attempt that was refused, with the values it used.
+    if (lastConnectBody) {
+      await connectToPbx(lastConnectBody);
+    }
   } catch (error) {
     setStatus(error.message, true);
   }
@@ -2895,7 +2945,10 @@ function handleConnectionLost(data) {
     ? `${base} Your unsaved edits are still in the editor.`
     : base;
   setStatus(message, true);
-  connectForm.elements.password.focus();
+  if (data.lastDisconnect?.profileId && servers.some((s) => s.id === data.lastDisconnect.profileId)) {
+    quickServerSelect.value = data.lastDisconnect.profileId;
+  }
+  quickPasswordInput.focus();
   return message;
 }
 
@@ -2903,12 +2956,67 @@ disconnectBtn.addEventListener("click", handleDisconnectClick);
 disconnectMiniBtn.addEventListener("click", handleDisconnectClick);
 
 expandConnectionBtn.addEventListener("click", () => {
-  setConnectionCollapsed(false, lastConnectionInfo);
+  showPage("settings", "servers-panel");
 });
 
-collapseConnectionBtn.addEventListener("click", () => {
-  setConnectionCollapsed(true, lastConnectionInfo);
-});
+// --- pages ---------------------------------------------------------------------------------
+// One document, three views. The view is in the URL (#reporting), so Back, reload and
+// bookmarks all land where you expect.
+const PAGES = ["configuration", "reporting", "settings"];
+let currentPage = null;
+
+function pageFromHash() {
+  const wanted = location.hash.replace(/^#/, "");
+  return PAGES.includes(wanted) ? wanted : "configuration";
+}
+
+/** Shows one page; with a panel id, also brings that panel into view. */
+function showPage(name, panelId = null) {
+  const page = PAGES.includes(name) ? name : "configuration";
+  const changed = page !== currentPage;
+  // The first page shown replaces the URL rather than adding a history entry.
+  const navigate = currentPage === null ? "replaceState" : "pushState";
+  currentPage = page;
+
+  for (const el of document.querySelectorAll(".page")) {
+    el.hidden = el.dataset.page !== page;
+  }
+  for (const link of document.querySelectorAll("#page-nav .page-link")) {
+    const active = link.dataset.page === page;
+    link.classList.toggle("is-active", active);
+    if (active) {
+      link.setAttribute("aria-current", "page");
+    } else {
+      link.removeAttribute("aria-current");
+    }
+  }
+  if (location.hash.replace(/^#/, "") !== page) {
+    history[navigate](null, "", `#${page}`);
+  }
+
+  if (changed && page === "settings" && currentUser) {
+    renderAccountPanel();
+    if (currentUser.role === "admin") {
+      refreshUsers().catch((error) => setStatus(error.message, true));
+    }
+  }
+
+  const panel = panelId ? document.getElementById(panelId) : null;
+  if (panel) {
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  } else if (changed) {
+    window.scrollTo(0, 0);
+  }
+}
+
+for (const link of document.querySelectorAll("#page-nav .page-link")) {
+  link.addEventListener("click", (e) => {
+    e.preventDefault();
+    showPage(link.dataset.page);
+  });
+}
+window.addEventListener("popstate", () => showPage(pageFromHash()));
+window.addEventListener("hashchange", () => showPage(pageFromHash()));
 
 themeToggleBtn.addEventListener("click", () => {
   applyTheme(currentTheme === "dark" ? "light" : "dark");
@@ -3537,8 +3645,6 @@ const authEnrol = document.getElementById("auth-enrol");
 const authRecoveryCodes = document.getElementById("auth-recovery-codes");
 
 const currentUserEl = document.getElementById("current-user");
-const accountBtn = document.getElementById("account-btn");
-const usersBtn = document.getElementById("users-btn");
 const logoutBtn = document.getElementById("logout-btn");
 const usersPanel = document.getElementById("users-panel");
 const accountPanel = document.getElementById("account-panel");
@@ -3617,9 +3723,16 @@ function applyIdentity(user, token) {
 
   const signedIn = Boolean(user);
   currentUserEl.hidden = !signedIn;
-  accountBtn.hidden = !signedIn;
   logoutBtn.hidden = !signedIn;
-  usersBtn.hidden = !signedIn || user.role !== "admin";
+  // Both live on the Settings page: everyone has an account, only admins manage users.
+  accountPanel.hidden = !signedIn;
+  usersPanel.hidden = !signedIn || user.role !== "admin";
+  if (signedIn && currentPage === "settings") {
+    renderAccountPanel();
+    if (user.role === "admin") {
+      refreshUsers().catch((error) => setStatus(error.message, true));
+    }
+  }
 
   if (signedIn) {
     currentUserEl.textContent = user.role === "user" ? user.username : `${user.username} (${user.role})`;
@@ -3801,23 +3914,10 @@ logoutBtn.addEventListener("click", async () => {
   showAuthOverlay("login");
 });
 
-accountBtn.addEventListener("click", () => {
-  accountPanel.hidden = !accountPanel.hidden;
-  usersPanel.hidden = true;
-  if (!accountPanel.hidden) {
-    renderAccountPanel();
-    accountPanel.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-});
-
-usersBtn.addEventListener("click", async () => {
-  usersPanel.hidden = !usersPanel.hidden;
-  accountPanel.hidden = true;
-  if (!usersPanel.hidden) {
-    await refreshUsers();
-    usersPanel.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-});
+// The name in the header is the way to your own account settings.
+currentUserEl.addEventListener("click", () => showPage("settings", "account-panel"));
+currentUserEl.title = "Account settings";
+currentUserEl.style.cursor = "pointer";
 
 // --- passkeys (WebAuthn) ---------------------------------------------------------
 //
@@ -4170,3 +4270,5 @@ async function onSignedIn() {
   }
 })();
 
+
+showPage(pageFromHash());

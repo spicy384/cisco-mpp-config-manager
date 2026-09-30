@@ -672,6 +672,18 @@ button.is-staged {
   background: #d97706;
 }
 
+/* The phone report scrolls within its box once capped; the header stays put. */
+#phones-results.is-capped {
+  overflow-y: auto;
+}
+
+#phones-results.is-capped thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+}
+
 .bulk-results td.mono-cell {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -1211,6 +1223,12 @@ tr.bulk-row-missing {
   grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) auto auto auto;
   gap: 10px;
   align-items: end;
+}
+
+/* Panels with one filter box and buttons: the buttons stay button-sized. */
+#phones-panel .log-controls,
+#audit-panel .log-controls {
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
 }
 
 #log-results {

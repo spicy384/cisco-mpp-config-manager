@@ -278,8 +278,9 @@ refused if that copy cannot be stored.
 ## Phones
 The **Phones** panel on the Reporting page lists every phone on the connected PBX with its
 name, MAC address, line 1 extension, model, registration status, the address it registered from
-and its round-trip time, config size, and when it was last changed through this app. It can
-be filtered and exported as CSV, and **Configure** opens the phone in the editor.
+and its round-trip time, config size, and when it was last changed through this app. It shows
+15 phones at a time and scrolls for the rest, or **Show all** expands it. It can be filtered
+and exported as CSV, and **Configure** opens the phone in the editor.
 
 ## Find in configs
 **Find in Configs** searches every phone config on the PBX for a tag, a value, or both, and

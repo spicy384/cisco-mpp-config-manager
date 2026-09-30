@@ -19,6 +19,7 @@ const phonesSearchInput = document.getElementById("phones-search");
 const phonesRefreshBtn = document.getElementById("phones-refresh-btn");
 const phonesExportBtn = document.getElementById("phones-export-btn");
 const phonesResultsEl = document.getElementById("phones-results");
+const phonesExpandBtn = document.getElementById("phones-expand-btn");
 const auditPanel = document.getElementById("audit-panel");
 const auditMetaEl = document.getElementById("audit-meta");
 const auditSearchInput = document.getElementById("audit-search");
@@ -858,7 +859,7 @@ function phoneReportRows() {
       size: file.size || 0,
       lastChange: lastChange.get(file.name) || null
     };
-  }).sort((a, b) => (a.station || a.name).localeCompare(b.station || b.name));
+  }).sort((a, b) => (a.station || a.name).localeCompare(b.station || b.name, undefined, { numeric: true, sensitivity: "base" }));
 }
 
 function filteredPhoneReport() {
@@ -952,7 +953,46 @@ function renderPhoneReport() {
   }
   table.appendChild(tbody);
   phonesResultsEl.appendChild(table);
+  capPhoneReport(rows.length);
 }
+
+// The table shows this many phones and scrolls for the rest, unless expanded.
+const PHONES_SHOWN = 15;
+let phonesExpanded = false;
+try {
+  phonesExpanded = localStorage.getItem("pbx-phones-expanded") === "1";
+} catch {
+  phonesExpanded = false;
+}
+
+/** Limits the table to PHONES_SHOWN rows of height, with a button to show them all. */
+function capPhoneReport(count) {
+  const needsCap = count > PHONES_SHOWN;
+  phonesExpandBtn.hidden = !needsCap;
+  phonesExpandBtn.textContent = phonesExpanded ? `Show ${PHONES_SHOWN} at a time` : `Show all ${count}`;
+
+  if (!needsCap || phonesExpanded) {
+    phonesResultsEl.style.maxHeight = "";
+    phonesResultsEl.classList.remove("is-capped");
+    return;
+  }
+  // Measure rather than guess: rows wrap differently at different widths.
+  const rowsEls = phonesResultsEl.querySelectorAll("tbody tr");
+  const cutoff = rowsEls[PHONES_SHOWN];
+  const top = phonesResultsEl.getBoundingClientRect().top;
+  phonesResultsEl.style.maxHeight = `${Math.ceil(cutoff.getBoundingClientRect().top - top)}px`;
+  phonesResultsEl.classList.add("is-capped");
+}
+
+phonesExpandBtn.addEventListener("click", () => {
+  phonesExpanded = !phonesExpanded;
+  try {
+    localStorage.setItem("pbx-phones-expanded", phonesExpanded ? "1" : "0");
+  } catch {
+    // Remembering it is a nicety only.
+  }
+  renderPhoneReport();
+});
 
 /** From any page: the Configuration page with this phone open. */
 async function openPhoneInEditor(name) {

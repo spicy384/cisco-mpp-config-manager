@@ -308,6 +308,12 @@ async function api(path, options = {}) {
       throw new Error(data.setupRequired ? "Setup required." : "Your session has expired. Sign in again.");
     }
 
+    // The PBX connection ended on its own: drop back to the connect form, whichever
+    // action happened to discover it.
+    if (data.connectionLost) {
+      data.error = handleConnectionLost(data);
+    }
+
     // Callers that need more than the message (e.g. the host-key mismatch details)
     // can read the full response from the error.
     const error = new Error(data.error || `Request failed (${res.status})`);
@@ -2090,6 +2096,12 @@ connectForm.addEventListener("submit", async (e) => {
     return;
   }
 
+  // Connecting to a different PBX replaces the open phone; the same one keeps it.
+  const targetKey = connectionKeyOf({ profileId: body.profileId, host: (body.host || "").trim(), remoteDir: (body.remoteDir || "").trim() });
+  if (workspaceKey && targetKey !== workspaceKey && !confirmDiscardEdits("connect to a different PBX")) {
+    return;
+  }
+
   if (body.profileId) {
     delete body.host;
     delete body.port;
@@ -2110,9 +2122,18 @@ connectForm.addEventListener("submit", async (e) => {
       fillFormFromServer(data.connection.profileId);
     }
 
+    const newKey = connectionKeyOf(data.connection);
+    const samePbx = Boolean(workspaceKey) && newKey === workspaceKey;
+    if (!samePbx) {
+      clearWorkspace();
+    }
+    workspaceKey = newKey;
+
     lastConnectionInfo = data.connection || null;
     setConnectionCollapsed(true, data.connection || null);
-    setPhoneModelChoice(null, null);
+    if (!samePbx) {
+      setPhoneModelChoice(null, null);
+    }
 
     const hostKey = data.connection?.hostKey;
     setStatus(hostKey?.status === "new"
@@ -2182,29 +2203,76 @@ async function handleDisconnectClick() {
   }
   try {
     await disconnectFromServer();
-    currentFile = "";
-    registrations = null;
-    regCountEl.hidden = true;
-    historyBtn.hidden = true;
-    historyPanel.hidden = true;
-    cloneBtn.hidden = true;
-    clonePanel.hidden = true;
-    connectedScopeKey = null;
-    bulkRollbackBtn.hidden = true;
-    renderLogEntries();
-    fileListEl.innerHTML = "";
-    clearRows();
-    setBaseline("flat-profile", []);
-    filesCountEl.textContent = "0 files";
-    allFiles = [];
-    selectedFiles.clear();
-    onSelectionChanged();
+    clearWorkspace();
+    workspaceKey = null;
     lastConnectionInfo = null;
     setConnectionCollapsed(false);
     setStatus("Disconnected");
   } catch (error) {
     setStatus(error.message, true);
   }
+}
+
+/** Empties everything that belongs to one PBX: the open phone, the list and selections. */
+function clearWorkspace() {
+  currentFile = "";
+  currentFileVersion = null;
+  registrations = null;
+  regCountEl.hidden = true;
+  historyBtn.hidden = true;
+  historyPanel.hidden = true;
+  cloneBtn.hidden = true;
+  clonePanel.hidden = true;
+  connectedScopeKey = null;
+  bulkRollbackBtn.hidden = true;
+  bulkRollbackResyncLabel.hidden = true;
+  renderLogEntries();
+  fileListEl.innerHTML = "";
+  clearRows();
+  setBaseline("flat-profile", []);
+  refreshQuickDirty();
+  filesCountEl.textContent = "0 files";
+  allFiles = [];
+  selectedFiles.clear();
+  onSelectionChanged();
+}
+
+// Which PBX the open phone, list and selections belong to, in the server's own terms.
+let workspaceKey = null;
+
+function connectionKeyOf(conn) {
+  if (!conn) return null;
+  return conn.profileId ? `profile:${conn.profileId}` : `host:${conn.host || ""}|dir:${conn.remoteDir || ""}`;
+}
+
+/**
+ * The connection ended on its own (idle timeout, PBX reboot, network). The open phone
+ * and any unsaved edits stay exactly as they are; only the connection state is reset,
+ * so reconnecting to the same PBX carries on where things stopped. Returns the message
+ * to show.
+ */
+function handleConnectionLost(data) {
+  const base = data.error || "The connection to the PBX was lost. Reconnect to continue.";
+  if (!lastConnectionInfo) {
+    return base;
+  }
+
+  lastConnectionInfo = null;
+  registrations = null;
+  regCountEl.hidden = true;
+  connectedScopeKey = null;
+  bulkRollbackBtn.hidden = true;
+  bulkRollbackResyncLabel.hidden = true;
+  renderFileList(getFilteredFiles());
+  renderLogEntries();
+  setConnectionCollapsed(false);
+
+  const message = editorIsDirty()
+    ? `${base} Your unsaved edits are still in the editor.`
+    : base;
+  setStatus(message, true);
+  connectForm.elements.password.focus();
+  return message;
 }
 
 disconnectBtn.addEventListener("click", handleDisconnectClick);
@@ -3442,6 +3510,7 @@ async function onSignedIn() {
     const data = await api("/api/status");
     if (data.connected && data.connection) {
       lastConnectionInfo = data.connection;
+      workspaceKey = connectionKeyOf(data.connection);
       setConnectionCollapsed(true, data.connection);
       setStatus(`Connected: ${data.connection.host} (${data.connection.remoteDir})`);
       if (data.connection.profileId) {
@@ -3451,6 +3520,9 @@ async function onSignedIn() {
       await refreshFiles();
     } else {
       setConnectionCollapsed(false);
+      if (data.lostMessage) {
+        setStatus(data.lostMessage, true);
+      }
     }
   } catch (_) {
     // Ignore load errors; individual panels report their own failures.

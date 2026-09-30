@@ -24,6 +24,9 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
   signing out or closing the tab asks first
 - Every result is shown as a notification pinned to the window, so it is visible wherever
   you are on the page; errors stay until dismissed
+- A dropped PBX connection is noticed and reported as such - keepalives catch a dead session
+  within about 45 seconds - and the page returns to the connect form with the open phone and
+  any unsaved edits intact, so reconnecting carries on where you left off
 - A save is refused if the file changed on the PBX since it was opened, naming the last
   writer, so two people editing the same phone cannot silently overwrite each other
 - Create new config files from a template and upload them, or **clone** an existing phone:
@@ -679,6 +682,8 @@ gitignored) or point `DEFAULT_TEMPLATE_PATH` at it. Either takes precedence over
   `data/templates.json` do not.
 - XML is rebuilt on save, so formatting and comments may differ from the source file. Bulk
   edit only rewrites files it actually changes, so unaffected files are left untouched.
+- If the connection drops during a bulk apply, the job still finishes: files already written
+  are logged and can be rolled back, and the rest are listed as not attempted.
 - The **SFTP connection is shared**: once someone connects, any signed-in user works through
   that connection. The change log records who did what, but users are not isolated from one
   another. Give accounts only to people you would trust with the PBX password.

@@ -115,10 +115,75 @@ function buildCacheScope() {
 function buildCacheKey(fileName) {
   return `${buildCacheScope()}/${fileName}`;
 }
+// Set when the PBX connection ends without anyone asking for it (idle timeout, PBX
+// reboot, network drop), so the next request can say what happened instead of failing
+// with whatever the SFTP layer happened to throw.
+let lastDisconnect = null;
+const deliberatelyClosed = new WeakSet();
+const SKIPPED_CONNECTION_LOST = "Not attempted: the connection to the PBX was lost first.";
+
+function connectionLostMessage() {
+  const where = lastDisconnect.profileName || lastDisconnect.host || "the PBX";
+  return `The connection to ${where} was lost (${lastDisconnect.reason}). Reconnect to continue.`;
+}
+
 function ensureConnected() {
-  if (!sftp || !connection) {
-    throw new Error("Not connected. Use the Connect button first.");
+  if (sftp && connection) {
+    return;
   }
+  if (lastDisconnect) {
+    const error = new Error(connectionLostMessage());
+    error.connectionLost = true;
+    error.status = 503;
+    throw error;
+  }
+  throw new Error("Not connected. Use the Connect button first.");
+}
+
+/** Watches a live connection and records when it ends on its own. */
+function watchConnection(client, info) {
+  let lastError = "";
+  client.client.on("error", (error) => {
+    lastError = error && error.message ? error.message : String(error);
+  });
+  // "end" arrives before "close", and the SFTP layer already refuses work by then,
+  // so whichever comes first settles it.
+  const onGone = () => {
+    if (sftp !== client || deliberatelyClosed.has(client)) {
+      return;
+    }
+    sftp = null;
+    connection = null;
+    registrationCache = null;
+    lastDisconnect = {
+      at: Date.now(),
+      host: info.host,
+      profileId: info.profileId || null,
+      profileName: info.profileName || null,
+      reason: lastError || "the PBX closed the connection"
+    };
+    console.warn(`PBX connection lost: ${info.host} - ${lastDisconnect.reason}`);
+  };
+  client.client.on("end", onGone);
+  client.client.on("close", onGone);
+}
+
+/**
+ * One place for failed requests to answer from. A request that failed because the
+ * connection went away says so (503, connectionLost) whatever the SFTP layer threw,
+ * so the browser can drop back to the connect form.
+ */
+function sendError(res, error, fallbackStatus = 500) {
+  const lost = Boolean(error && error.connectionLost) || (!sftp && Boolean(lastDisconnect));
+  if (lost) {
+    return res.status(503).json({
+      error: connectionLostMessage(),
+      connectionLost: true,
+      lastDisconnect,
+      detail: error && !error.connectionLost ? error.message : undefined
+    });
+  }
+  return res.status((error && error.status) || fallbackStatus).json({ error: error.message });
 }
 
 function ensureDataStore() {
@@ -893,7 +958,9 @@ async function resyncChangedPhones(job) {
 
   for (const item of targets) {
     job.currentFile = item.name;
-    item.resync = await sendResync(sftp.client, job.request.resyncCommand, item.ext);
+    item.resync = sftp
+      ? await sendResync(sftp.client, job.request.resyncCommand, item.ext)
+      : { status: "failed", ext: item.ext || null, detail: "the connection to the PBX was lost" };
     job.resyncDone += 1;
   }
 
@@ -1071,6 +1138,7 @@ async function runSearchJob(job) {
   const { criteria: raw, remoteDir } = job.request;
   const criteria = buildSearchCriteria(raw);
 
+  ensureConnected();
   const remoteList = await sftp.list(remoteDir);
   const fileNames = remoteList
     .filter((item) => item.type !== "d" && /^spa.*\.xml$/i.test(item.name))
@@ -1082,6 +1150,7 @@ async function runSearchJob(job) {
 
   for (const fileName of fileNames) {
     job.currentFile = fileName;
+    ensureConnected();
     try {
       const content = await sftp.get(path.posix.join(remoteDir, fileName));
       const { entries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
@@ -1151,6 +1220,12 @@ async function runRollbackJob(job) {
   for (const target of targets) {
     job.currentFile = target.fileName;
 
+    if (!sftp) {
+      job.results.push({ name: target.fileName, station: "", status: "error", error: SKIPPED_CONNECTION_LOST });
+      job.processed += 1;
+      continue;
+    }
+
     try {
       const result = await restoreSnapshot(target.fileName, target.snapshotId, user);
       job.results.push({
@@ -1196,6 +1271,12 @@ async function runBulkJob(job) {
 
   for (const fileName of fileNames) {
     job.currentFile = fileName;
+
+    if (!sftp) {
+      job.results.push({ name: fileName, station: "", status: "error", error: SKIPPED_CONNECTION_LOST });
+      job.processed += 1;
+      continue;
+    }
     const remotePath = path.posix.join(remoteDir, fileName);
 
     try {
@@ -1441,7 +1522,7 @@ app.post("/api/bulk-edit", (req, res) => {
 
     return res.status(202).json({ jobId: job.id, total: job.total, dryRun: isDryRun });
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return sendError(res, error);
   }
 });
 
@@ -1486,7 +1567,7 @@ app.post("/api/search", (req, res) => {
     launchJob(job, runSearchJob);
     return res.status(202).json({ jobId: job.id, dryRun: true });
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return sendError(res, error);
   }
 });
 
@@ -1549,7 +1630,7 @@ app.post("/api/bulk-edit/:jobId/rollback", authGuard.requireWriter, (req, res) =
 
     return res.status(202).json({ jobId: job.id, total: job.total, dryRun: false, rollbackOf: source.id });
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return sendError(res, error);
   }
 });
 
@@ -1742,6 +1823,7 @@ app.post("/api/connect", async (req, res) => {
   }
 
   if (sftp) {
+    deliberatelyClosed.add(sftp);
     try {
       await sftp.end();
     } catch (_) {
@@ -1765,6 +1847,10 @@ app.post("/api/connect", async (req, res) => {
         username: target.username,
         password,
         readyTimeout: 15000,
+        // A PBX that stops answering is noticed within about 45 seconds rather than
+        // at the next click, and idle sessions are kept alive through firewalls.
+        keepaliveInterval: 15000,
+        keepaliveCountMax: 3,
         hostVerifier: hostKey.verifier
       });
     } catch (error) {
@@ -1796,6 +1882,8 @@ app.post("/api/connect", async (req, res) => {
       defaultModel: normalizeModelChoice(target.defaultModel),
       hostKey: { fingerprint: hostKey.outcome.fingerprint, status: hostKey.outcome.status }
     };
+    lastDisconnect = null;
+    watchConnection(client, connection);
 
     return res.json({
       ok: true,
@@ -1842,7 +1930,13 @@ app.post("/api/known-hosts/forget", authGuard.requireAdmin, (req, res) => {
 });
 
 app.get("/api/status", (req, res) => {
-  res.json({ connected: Boolean(connection), connection });
+  res.json({
+    connected: Boolean(connection),
+    connection,
+    // Present only when the last connection ended on its own.
+    lastDisconnect: connection ? null : lastDisconnect,
+    lostMessage: !connection && lastDisconnect ? connectionLostMessage() : null
+  });
 });
 
 // The browser builds its Quick editor forms from this, so the recipes stay
@@ -1908,7 +2002,7 @@ app.get("/api/files", async (req, res) => {
 
     res.json({ files });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, error);
   }
 });
 
@@ -1926,7 +2020,7 @@ app.get("/api/files/:name", async (req, res) => {
 
     res.json({ fileName, rootKey, entries, xmlText, version: contentVersion(xmlText), model: getPhoneModel(fileName) });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, error);
   }
 });
 
@@ -1936,7 +2030,7 @@ app.get("/api/files/:name/model", (req, res) => {
     const fileName = sanitizeFileName(req.params.name);
     res.json({ fileName, model: getPhoneModel(fileName), profileDefault: connection.defaultModel || null });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, error);
   }
 });
 
@@ -1951,7 +2045,7 @@ app.put("/api/files/:name/model", authGuard.requireWriter, (req, res) => {
     const model = setPhoneModel(fileName, wanted);
     res.json({ ok: true, fileName, model });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, error);
   }
 });
 
@@ -2025,7 +2119,7 @@ app.post("/api/files/clone", authGuard.requireWriter, async (req, res) => {
 
     return res.json({ ok: true, message: `Created ${fileName} from ${source}`, fileName, source });
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return sendError(res, error);
   }
 });
 
@@ -2106,7 +2200,7 @@ app.post("/api/files/:name", authGuard.requireWriter, async (req, res) => {
 
     res.json({ ok: true, message: `Saved ${fileName}`, fileName, version: contentVersion(xml) });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, error);
   }
 });
 
@@ -2119,7 +2213,7 @@ app.get("/api/files/:name/history", (req, res) => {
 
     res.json({ fileName, keep: SNAPSHOT_KEEP, versions: snapshots.list(scope.key, fileName) });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, error);
   }
 });
 
@@ -2155,7 +2249,7 @@ app.get("/api/files/:name/history/:id", async (req, res) => {
       diff: current ? diffEntriesForLog(current, restored.entries) : []
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, error);
   }
 });
 
@@ -2176,7 +2270,7 @@ app.post("/api/files/:name/restore", authGuard.requireWriter, async (req, res) =
     const result = await restoreSnapshot(fileName, snapshotId, req.user ? req.user.username : "");
     res.json({ ok: true, message: `Restored ${fileName}`, ...result });
   } catch (error) {
-    res.status(error.status || 500).json({ error: error.message });
+    sendError(res, error);
   }
 });
 
@@ -2242,7 +2336,7 @@ app.get("/api/registrations", async (req, res) => {
       files
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, error);
   }
 });
 
@@ -2263,7 +2357,7 @@ app.post("/api/files/:name/resync", authGuard.requireWriter, async (req, res) =>
     const who = result.station ? `${result.station} (${result.ext})` : result.ext;
     return res.json({ ok: true, message: `Resync sent to ${who}`, ...result });
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return sendError(res, error);
   }
 });
 
@@ -2324,16 +2418,20 @@ app.post("/api/files", authGuard.requireWriter, async (req, res) => {
 
     res.json({ ok: true, message: `Created ${fileName}`, fileName });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, error);
   }
 });
 
 app.delete("/api/connection", authGuard.requireWriter, async (req, res) => {
+  // Asked for, so there is nothing to report as lost afterwards.
+  lastDisconnect = null;
+
   if (!sftp) {
     connection = null;
     return res.json({ ok: true });
   }
 
+  deliberatelyClosed.add(sftp);
   try {
     await sftp.end();
   } catch (_) {

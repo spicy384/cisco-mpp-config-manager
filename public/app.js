@@ -175,6 +175,53 @@ function deepClone(obj) {
 function setStatus(message, isError = false) {
   statusEl.textContent = message;
   statusEl.classList.toggle("is-error", isError);
+  showToast(message, isError);
+}
+
+// The status line sits at the top of a long page, so every message is also shown as
+// a toast pinned to the window. Errors stay until dismissed; the rest fade on their own.
+const TOAST_LIFETIME_MS = 5000;
+const MAX_TOASTS = 4;
+
+function showToast(message, isError = false) {
+  const container = document.getElementById("toasts");
+  const text = String(message || "").trim();
+  if (!container || !text) {
+    return;
+  }
+
+  // The same message again (a repeated click) refreshes the toast rather than stacking.
+  for (const existing of container.children) {
+    if (existing.dataset.message === text) {
+      existing.remove();
+    }
+  }
+
+  const toast = document.createElement("div");
+  toast.className = `toast${isError ? " is-error" : ""}`;
+  toast.dataset.message = text;
+
+  const body = document.createElement("span");
+  body.className = "toast-text";
+  body.textContent = text;
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "toast-close";
+  close.setAttribute("aria-label", "Dismiss");
+  close.textContent = "\u00d7";
+  close.addEventListener("click", () => toast.remove());
+
+  toast.append(body, close);
+  container.appendChild(toast);
+
+  while (container.children.length > MAX_TOASTS) {
+    container.firstElementChild.remove();
+  }
+
+  if (!isError) {
+    setTimeout(() => toast.remove(), TOAST_LIFETIME_MS);
+  }
 }
 
 function setFilesLoading(isLoading) {

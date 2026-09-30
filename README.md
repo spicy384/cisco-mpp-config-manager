@@ -22,6 +22,8 @@ edit fields, and upload saved or new configs. Runs as a container on a managemen
 - `Ctrl`/`Cmd`+`S` to save; Save buttons at the top and bottom of the editor
 - Unsaved edits are never dropped silently: opening another phone, cloning, disconnecting,
   signing out or closing the tab asks first
+- Every result is shown as a notification pinned to the window, so it is visible wherever
+  you are on the page; errors stay until dismissed
 - A save is refused if the file changed on the PBX since it was opened, naming the last
   writer, so two people editing the same phone cannot silently overwrite each other
 - Create new config files from a template and upload them, or **clone** an existing phone:

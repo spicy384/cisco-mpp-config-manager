@@ -11,6 +11,11 @@ const express = require("express");
 const QRCode = require("qrcode");
 
 const auth = require("./auth");
+const { createRateLimiter } = require("./rate-limit");
+
+// Failed sign-in attempts allowed per client address per 15 minutes, on top of the
+// per-account lockout below. 0 switches the address limit off (tests do this).
+const LOGIN_RATE_LIMIT = process.env.LOGIN_RATE_LIMIT === undefined ? 20 : Number(process.env.LOGIN_RATE_LIMIT) || 0;
 const webauthn = require("@simplewebauthn/server");
 
 const SESSION_COOKIE = "pbx_session";
@@ -384,6 +389,12 @@ function createAuth({ dataDir }) {
   // --- routes --------------------------------------------------------------
 
   const router = express.Router();
+
+  // Address-based throttle on everything that takes a credential while signed out.
+  if (LOGIN_RATE_LIMIT > 0) {
+    const limiter = createRateLimiter({ maxFailures: LOGIN_RATE_LIMIT });
+    router.use(["/api/auth/setup", "/api/auth/login", "/api/auth/login/mfa", "/api/auth/login/recovery", "/api/auth/passkeys/login/verify"], limiter.middleware);
+  }
 
   router.get("/api/auth/me", (req, res) => {
     if (!hasUsers()) {

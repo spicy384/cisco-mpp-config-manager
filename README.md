@@ -1,7 +1,32 @@
 ﻿# PBX MPP Config Manager
 
+[![Latest release](https://img.shields.io/github/v/tag/spicy384/cisco-mpp-config-manager?label=version&sort=semver)](https://github.com/spicy384/cisco-mpp-config-manager/tags)
+[![Image build](https://github.com/spicy384/cisco-mpp-config-manager/actions/workflows/docker-image.yml/badge.svg)](https://github.com/spicy384/cisco-mpp-config-manager/actions/workflows/docker-image.yml)
+[![Container image](https://img.shields.io/badge/ghcr.io-spicy384%2Fcisco--mpp--config--manager-blue)](https://github.com/spicy384/cisco-mpp-config-manager/pkgs/container/cisco-mpp-config-manager)
+
 Small web app to connect to FreePBX over SFTP, list Cisco MPP `.xml` config files, view and
 edit fields, and upload saved or new configs. Runs as a container on a management server.
+
+![The Configuration page: the connected PBX, its phones with registration state, and one open in the Quick editor](docs/screenshots/configuration.png)
+
+## Screenshots
+
+All taken against a mock PBX with made-up phones (`npm run screenshots` regenerates them);
+nothing here is a real system.
+
+| | |
+|---|---|
+| **Quick editor**: line keys, speed dials and BLFs by picking a key, and the common settings as plain fields. The Advanced tab has the whole tag table.<br>![The editor with the Quick tab](docs/screenshots/editor.png) | **Bulk Edit**: one tag across the ticked phones, previewed file by file before anything is written.<br>![Bulk Edit preview](docs/screenshots/bulk-edit.png) |
+| **Phones**: every phone on the PBX with its registration, address, model and last change.<br>![Phones report](docs/screenshots/phones.png) | **Drift report**: which phones differ from the one you trust, tag by tag.<br>![Drift report](docs/screenshots/drift.png) |
+| **Change Log**: every write the app made, per PBX, with one-click restore.<br>![Change log](docs/screenshots/change-log.png) | **PBX Servers**: saved connections with the SIP server, resync and status commands and default phone model.<br>![PBX Servers settings](docs/screenshots/servers.png) |
+
+**Version and updates** under Settings: the running build, and whether a newer image is published.
+
+![Version and updates panel](docs/screenshots/version.png)
+
+Dark theme:
+
+![The Configuration page in the dark theme](docs/screenshots/configuration-dark.png)
 
 ## Finding your way around
 The app has three pages, reached from the links in the header. Each has its own address

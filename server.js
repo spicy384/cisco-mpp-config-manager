@@ -43,13 +43,12 @@ function resolveDefaultTemplatePath() {
 // Per-server change history is capped so the log file cannot grow without bound.
 const MAX_LOG_ENTRIES_PER_SCOPE = 2000;
 
-// Behind a reverse proxy, say how many proxies to trust (usually 1) so the audit log
-// records the client's address rather than the proxy's. Off by default: trusting
-// forwarded headers from anyone would let a client choose the address it is logged as.
-if (process.env.TRUST_PROXY) {
-  const hops = Number(process.env.TRUST_PROXY);
-  app.set("trust proxy", Number.isInteger(hops) ? hops : process.env.TRUST_PROXY);
-}
+// Which proxies may set X-Forwarded-For (and so what req.ip means for the sign-in
+// throttle and the audit log). The default trusts a proxy on this host or on a private
+// network; TRUST_PROXY takes Express's forms: "false", a hop count, or a comma-separated
+// list of addresses/CIDRs/"loopback"/"uniquelocal".
+const TRUST_PROXY = process.env.TRUST_PROXY === undefined || process.env.TRUST_PROXY === "" ? "loopback, uniquelocal" : process.env.TRUST_PROXY;
+app.set("trust proxy", /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY === "false" ? false : TRUST_PROXY === "true" ? true : TRUST_PROXY);
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -3289,6 +3288,15 @@ app.delete("/api/connection", authGuard.requireWriter, async (req, res) => {
     await closeLink(key, `disconnected by ${req.user ? req.user.username : "another user"}`);
   }
   res.json({ ok: true, connections: describeLinks(null) });
+});
+
+// Errors that escape a route (an unreadable accounts file, for one) come back as JSON
+// with the status they carry, instead of Express's HTML page.
+app.use((error, req, res, next) => {
+  const status = Number.isInteger(error.status) && error.status >= 400 ? error.status : 500;
+  if (status >= 500) console.error(`${req.method} ${req.path}: ${error.stack || error.message}`);
+  if (res.headersSent) return;
+  res.status(status).json({ error: status >= 500 && !error.status ? "Internal error." : error.message });
 });
 
 // Only boot when run directly, so tests can require the pure helpers below

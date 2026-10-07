@@ -514,7 +514,7 @@ The container logs which template it resolved at startup, so check `docker compo
 | `SNAPSHOT_KEEP` | `20` | Versions kept per config file for restore and rollback |
 | `AUDIT_KEEP` | `5000` | Entries kept in the audit log |
 | `SSH_KEY_FILE` | unset | Path to your own SSH private key, instead of one the app creates |
-| `TRUST_PROXY` | unset | Number of reverse proxies in front, so the audit log records client addresses |
+| `TRUST_PROXY` | `loopback, uniquelocal` | Which proxies may set `X-Forwarded-For` (so what the client address is for the sign-in throttle and the audit log): `false`, a hop count, or addresses/CIDRs, as Express takes them |
 | `PROXY_USER_HEADER` | `remote-user` | Which header carries the username in that mode |
 
 ### Updating
@@ -652,9 +652,10 @@ It can be filtered, narrowed to failures, and exported as CSV. It is kept in
 `audit-log.json` in the data directory, newest 5,000 entries (`AUDIT_KEEP`), and
 deliberately cannot be cleared from the app.
 
-Behind a reverse proxy every request arrives from the proxy, so set `TRUST_PROXY=1` (the
-number of proxies in front) for the log to record the real client address. Leave it unset
-when the app is reached directly: it makes the app believe the `X-Forwarded-For` header.
+Behind a reverse proxy every request arrives from the proxy; `X-Forwarded-For` is believed
+only when it comes from a proxy `TRUST_PROXY` names. The default (`loopback, uniquelocal`)
+covers a proxy on the same host or a private network; set `TRUST_PROXY=false` when the app
+is reached directly, or a hop count / address list for anything else.
 
 ### SSH host keys
 The app works like OpenSSH's `known_hosts`. The first time it connects to a PBX it
@@ -783,9 +784,9 @@ on the host at all:
    - **Websockets Support**: not needed; the app polls over plain HTTP
    - **SSL tab**: request a certificate and turn on **Force SSL** and **HTTP/2**
 
-The app does not read `X-Forwarded-*` headers, so no extra proxy configuration is required.
-Lockout is tracked per account rather than per IP, so it keeps working correctly even though
-every request now arrives from the proxy's address.
+The proxy's `X-Forwarded-For` is trusted when it comes from a private address (the default
+`TRUST_PROXY`), so the sign-in throttle and the audit log see the real client. Lockout is
+tracked per account rather than per IP, so it works either way.
 
 #### When NPM is on a different host
 A shared Docker network is not available across machines, so the app has to listen on the

@@ -22,6 +22,9 @@ COPY public ./public
 # Bundled placeholder template; a real one mounted at /data takes precedence.
 COPY examples ./examples
 
+# Fail the build, not the first start, when a module the server needs was left out of the copy list above.
+RUN node -e "require('./server.js')"
+
 # The image ships no data; /data is a volume that outlives the container.
 # node:alpine already provides an unprivileged `node` user (uid 1000).
 RUN mkdir -p /data && chown -R node:node /data /app

@@ -31,10 +31,15 @@ services:
       # Secure. Leave false on plain HTTP or sign-in will not work at all.
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
 
-      # Behind a reverse proxy, the number of proxies in front (usually 1), so the audit
-      # log records each client's address rather than the proxy's. Leave unset when the
-      # app is reached directly.
+      # Which proxies may set X-Forwarded-For, so the sign-in throttle and the audit log see
+      # each client's address rather than the proxy's. Unset means a proxy on this host or a
+      # private network; "false" when the app is reached directly; a hop count or address
+      # list for anything else.
       TRUST_PROXY: ${TRUST_PROXY:-}
+
+      # Once a day the app asks ghcr.io whether a newer image is published and says so in
+      # the footer. Set false for a host that must not make outbound requests.
+      UPDATE_CHECK: ${UPDATE_CHECK:-true}
 
       # --- HTTPS -----------------------------------------------------------
       # Encrypts the hop between a reverse proxy and this app, which matters when the

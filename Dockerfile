@@ -1,6 +1,6 @@
 # PBX MPP Config Manager
 # Small Express app; no build step, so a single stage keeps it simple.
-FROM node:22-alpine
+FROM node:24-alpine
 
 # tini: correct signal handling so `docker stop` exits promptly rather than
 #       waiting out the 10s kill timeout.
@@ -17,7 +17,15 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY server.js auth.js auth-routes.js rate-limit.js json-store.js tls-setup.js host-keys.js snapshots.js resync.js registration.js audit-log.js ssh-key.js ./
+# Baked in by the workflow so the footer can say which build is running. Placed after
+# the dependency layer: an ENV changes the cache key of every later step, and these
+# change on every commit.
+ARG GIT_SHA=""
+ARG BUILD_DATE=""
+ENV APP_COMMIT=$GIT_SHA \
+    APP_BUILD_DATE=$BUILD_DATE
+
+COPY server.js auth.js auth-routes.js rate-limit.js json-store.js version.js tls-setup.js host-keys.js snapshots.js resync.js registration.js audit-log.js ssh-key.js ./
 COPY public ./public
 # Bundled placeholder template; a real one mounted at /data takes precedence.
 COPY examples ./examples

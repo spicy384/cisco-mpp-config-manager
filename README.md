@@ -514,6 +514,8 @@ The container logs which template it resolved at startup, so check `docker compo
 | `SNAPSHOT_KEEP` | `20` | Versions kept per config file for restore and rollback |
 | `AUDIT_KEEP` | `5000` | Entries kept in the audit log |
 | `SSH_KEY_FILE` | unset | Path to your own SSH private key, instead of one the app creates |
+| `UPDATE_CHECK` | `true` | `false` switches off the daily look at the registry for a newer image and locks the Settings checkbox |
+| `UPDATE_IMAGE` | `ghcr.io/spicy384/cisco-mpp-config-manager` | The image whose tags the update check compares against, if you publish under another name |
 | `TRUST_PROXY` | `loopback, uniquelocal` | Which proxies may set `X-Forwarded-For` (so what the client address is for the sign-in throttle and the audit log): `false`, a hop count, or addresses/CIDRs, as Express takes them |
 | `PROXY_USER_HEADER` | `remote-user` | Which header carries the username in that mode |
 
@@ -547,6 +549,24 @@ docker compose up -d
 To pin a version rather than follow `latest`, change the tag in the compose file. Pulling
 needs no sign-in once the package is public; until then, `docker login ghcr.io` with a
 GitHub token that has `read:packages`.
+
+## Versions and updates
+
+The footer shows the running version (from `package.json`) and, in the container, the
+commit and build date baked in by the workflow. Once a day the app lists the image's tags
+on GitHub Container Registry and, when a higher release than its own is published, the
+footer says so with the `docker compose pull` to run; administrators can **Check now**.
+Only the image name goes over the wire. To switch the check off, untick **Check daily for
+a newer release** under **Settings → Version and updates** (administrators; takes effect at
+once and is remembered in `app-settings.json`), or set `UPDATE_CHECK=false` in the
+environment, which wins and locks the checkbox. Set `UPDATE_IMAGE` if you publish the
+image under another name.
+
+Releases are git tags: `git tag v1.2.3 && git push origin v1.2.3` builds and publishes
+`ghcr.io/spicy384/cisco-mpp-config-manager:1.2.3` (and `:1.2`) from that commit, next to
+the `:latest` that every push to `main` produces. Bump `version` in `package.json` in the
+same commit so the footer and the update check agree. Dependabot opens weekly pull requests
+for npm dependencies and GitHub Actions versions.
 
 ## Accounts and two-factor authentication
 The app has its own sign-in. On first run it asks you to create an administrator, then

@@ -58,6 +58,43 @@ const { resolveTlsOptions } = require("./tls-setup");
 const { quickSchema, normalizeModelChoice } = require("./public/quick-config");
 const { macToFileName } = require("./public/csv-rows");
 const authGuard = createAuth({ dataDir: DATA_DIR });
+const { readJsonFile, writeJsonFile } = require("./json-store");
+const { createUpdateChecker } = require("./version");
+const pkg = require("./package.json");
+
+// Small app-wide settings an administrator changes in the UI (today: the update check).
+const APP_SETTINGS_FILE = path.join(DATA_DIR, "app-settings.json");
+function getAppSetting(key) {
+  const value = readJsonFile(APP_SETTINGS_FILE, {})[key];
+  return value === undefined ? null : value;
+}
+function setAppSetting(key, value) {
+  writeJsonFile(APP_SETTINGS_FILE, { ...readJsonFile(APP_SETTINGS_FILE, {}), [key]: value });
+}
+
+// Running version (package.json, plus the commit the image was built from) and the daily
+// look at the registry for a newer release. The check can be switched off in two places:
+// UPDATE_CHECK=false in the environment (which wins, and locks the setting), or the
+// checkbox under Settings.
+const UPDATE_CHECK_ALLOWED = String(process.env.UPDATE_CHECK || "true").toLowerCase() !== "false";
+const updates = createUpdateChecker({
+  version: pkg.version,
+  commit: process.env.APP_COMMIT || null,
+  buildDate: process.env.APP_BUILD_DATE || null,
+  image: process.env.UPDATE_IMAGE || "ghcr.io/spicy384/cisco-mpp-config-manager",
+  enabled: () => {
+    if (!UPDATE_CHECK_ALLOWED) return false;
+    try {
+      return getAppSetting("updateCheck") !== false;
+    } catch {
+      return false; // an unreadable settings file must not take the process down from a timer
+    }
+  }
+});
+/** What the API reports: the checker's state plus whether the environment has locked it off. */
+function versionInfo() {
+  return { ...updates.describe(), lockedByEnvironment: !UPDATE_CHECK_ALLOWED };
+}
 const { createSshKeyStore } = require("./ssh-key");
 // The app's own SSH key, for profiles set to sign in with a key instead of a password.
 const sshKey = createSshKeyStore({ dataDir: DATA_DIR });
@@ -167,6 +204,8 @@ const AUDIT_RULES = [
   { method: "POST", path: /^\/api\/ssh-key$/, action: "ssh-key-generated",
     describe: (req, res, body) => ({ target: body && body.fingerprint ? body.fingerprint : "", detail: res.statusCode < 400 && req.body?.replace === true ? "replaced the previous key" : undefined }) },
   { method: "DELETE", path: /^\/api\/ssh-key$/, action: "ssh-key-removed" },
+  { method: "PUT", path: /^\/api\/version\/settings$/, action: "update-check",
+    describe: (req) => ({ detail: req.body?.enabled ? "switched on" : "switched off" }) },
   { method: "POST", path: /^\/api\/known-hosts\/forget$/, action: "host-key-forgotten",
     describe: (req) => ({ target: `${String(req.body?.host || "").trim()}:${Number(req.body?.port) || 22}` }) },
   { method: "DELETE", path: /^\/api\/logs\/(.+)$/, action: "change-log-cleared",
@@ -2619,6 +2658,31 @@ app.post("/api/known-hosts/forget", authGuard.requireAdmin, (req, res) => {
   res.json({ ok: true, forgotten, host, port });
 });
 
+// --- version and update check -------------------------------------------------
+
+app.get("/api/version", (req, res) => {
+  res.json(versionInfo());
+});
+
+/** Asks the registry now instead of waiting for the daily check. */
+app.post("/api/version/check", authGuard.requireAdmin, async (req, res) => {
+  await updates.check();
+  res.json(versionInfo());
+});
+
+/** Switches the daily update check on or off. The environment variable, when set to false, wins. */
+app.put("/api/version/settings", authGuard.requireAdmin, async (req, res) => {
+  const enabled = Boolean(req.body && req.body.enabled);
+  if (enabled && !UPDATE_CHECK_ALLOWED) {
+    return res.status(409).json({ error: "The update check is switched off by UPDATE_CHECK=false in the environment; remove that to enable it here." });
+  }
+  setAppSetting("updateCheck", enabled);
+  if (!enabled) updates.forget();
+  // Turning it on asks straight away, so the page shows a result rather than "pending".
+  if (enabled) await updates.check();
+  res.json(versionInfo());
+});
+
 app.get("/api/status", (req, res) => {
   const connection = pbx.connection;
   const lost = pbx.lastDisconnect;
@@ -3322,6 +3386,8 @@ if (require.main === module) {
   server.listen(PORT, () => {
     console.log(`PBX MPP Config Manager running at ${scheme}://localhost:${PORT}`);
     console.log(`Data directory: ${DATA_DIR}`);
+    console.log(`Version: ${pkg.version}${process.env.APP_COMMIT ? ` (${String(process.env.APP_COMMIT).slice(0, 7)})` : ""}; update check ${updates.describe().enabled ? `daily against ${updates.describe().image}` : UPDATE_CHECK_ALLOWED ? "off (switched off under Settings)" : "off (UPDATE_CHECK=false)"}.`);
+    updates.start();
 
     if (tlsOptions) {
       console.log(`TLS: on (${tlsOptions.mode}) - ${tlsOptions.detail}`);

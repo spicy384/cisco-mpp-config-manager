@@ -1896,3 +1896,18 @@ body.role-viewer .writer-only {
 .enrol-passkey .auth-hint.is-ok {
   color: var(--success);
 }
+
+/* Version footer: the running build, and whether a newer image exists. */
+.app-footer {
+  margin: 8px 24px 24px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.app-update.is-update {
+  color: var(--primary);
+  font-weight: 600;
+}

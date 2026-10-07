@@ -4245,6 +4245,8 @@ const currentUserEl = document.getElementById("current-user");
 const logoutBtn = document.getElementById("logout-btn");
 const usersPanel = document.getElementById("users-panel");
 const accountPanel = document.getElementById("account-panel");
+const versionPanel = document.getElementById("version-panel");
+const appFooter = document.getElementById("app-footer");
 const usersResultsEl = document.getElementById("users-results");
 const usersCountEl = document.getElementById("users-count");
 
@@ -4328,6 +4330,7 @@ function applyIdentity(user, token) {
   accountPanel.hidden = !signedIn;
   usersPanel.hidden = !signedIn || user.role !== "admin";
   auditPanel.hidden = !signedIn || user.role !== "admin";
+  versionPanel.hidden = !signedIn || user.role !== "admin";
   if (signedIn && currentPage === "settings") {
     refreshSshKey().catch(() => {});
   }
@@ -4348,8 +4351,87 @@ function applyIdentity(user, token) {
   if (!signedIn) {
     usersPanel.hidden = true;
     accountPanel.hidden = true;
+    appFooter.hidden = true;
+  } else {
+    refreshVersion();
   }
 }
+
+// --- version footer and update check ---------------------------------------------
+
+function renderVersion(v) {
+  const label = document.getElementById("app-version");
+  const update = document.getElementById("app-update");
+  const button = document.getElementById("app-update-check");
+  appFooter.hidden = false;
+  const build = [v.commit ? v.commit.slice(0, 7) : null, v.buildDate ? `built ${String(v.buildDate).slice(0, 10)}` : null].filter(Boolean).join(", ");
+  label.textContent = `PBX MPP Config Manager v${v.version}${build ? ` (${build})` : ""}`;
+  update.className = "app-update";
+  if (!v.enabled) {
+    update.textContent = "Update check off.";
+  } else if (v.updateAvailable) {
+    update.textContent = `Version ${v.latest} is available: pull the new image (docker compose pull && docker compose up -d).`;
+    update.classList.add("is-update");
+  } else if (v.error) {
+    update.textContent = `Update check failed: ${v.error}.`;
+  } else if (v.checkedAt) {
+    update.textContent = `Up to date${v.latest ? ` (latest release ${v.latest})` : ""}; checked ${formatTimestamp(v.checkedAt * 1000)}.`;
+  } else {
+    update.textContent = "Update check pending.";
+  }
+  const admin = currentUser?.role === "admin";
+  button.hidden = !admin || !v.enabled;
+
+  // The Settings panel mirrors the footer and carries the switch.
+  const box = document.getElementById("version-check-enabled");
+  box.checked = Boolean(v.enabled);
+  box.disabled = Boolean(v.lockedByEnvironment);
+  document.getElementById("version-locked").hidden = !v.lockedByEnvironment;
+  document.getElementById("version-badge").textContent = v.enabled ? (v.updateAvailable ? `${v.latest} available` : "checking daily") : "update check off";
+  document.getElementById("version-current").textContent = `${label.textContent}. ${update.textContent}`;
+  document.getElementById("version-check-now").disabled = !v.enabled;
+}
+
+async function refreshVersion() {
+  try {
+    renderVersion(await api("/api/version"));
+  } catch {
+    // The footer keeps whatever it showed; nothing else depends on it.
+  }
+}
+
+async function checkForUpdateNow(button) {
+  button.disabled = true;
+  try {
+    renderVersion(await api("/api/version/check", { method: "POST", body: "{}" }));
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+document.getElementById("app-update-check").addEventListener("click", (e) => checkForUpdateNow(e.currentTarget));
+document.getElementById("version-check-now").addEventListener("click", (e) => checkForUpdateNow(e.currentTarget));
+
+document.getElementById("version-check-enabled").addEventListener("change", async (e) => {
+  const box = e.currentTarget;
+  box.disabled = true;
+  try {
+    const v = await api("/api/version/settings", { method: "PUT", body: JSON.stringify({ enabled: box.checked }) });
+    renderVersion(v);
+    setStatus(v.enabled ? "Update check switched on." : "Update check switched off; the app no longer contacts the registry.");
+  } catch (error) {
+    setStatus(error.message, true);
+    try {
+      renderVersion(await api("/api/version"));
+    } catch {
+      // Could not even read the state back: undo the click and let the user try again.
+      box.checked = !box.checked;
+      box.disabled = false;
+    }
+  }
+});
 
 async function refreshIdentity() {
   const me = await (await fetch("/api/auth/me")).json();

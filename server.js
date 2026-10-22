@@ -51,7 +51,6 @@ const TRUST_PROXY = process.env.TRUST_PROXY === undefined || process.env.TRUST_P
 app.set("trust proxy", /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY === "false" ? false : TRUST_PROXY === "true" ? true : TRUST_PROXY);
 
 app.use(express.json({ limit: "1mb" }));
-app.use(express.static(path.join(__dirname, "public")));
 
 const { createAuth } = require("./auth-routes");
 const { resolveTlsOptions } = require("./tls-setup");
@@ -61,6 +60,27 @@ const authGuard = createAuth({ dataDir: DATA_DIR });
 const { readJsonFile, writeJsonFile } = require("./json-store");
 const { createUpdateChecker } = require("./version");
 const pkg = require("./package.json");
+
+// The page, with its scripts and stylesheet addressed by version (/app.js?v=1.0.0), so
+// neither a browser nor a caching proxy in front (Nginx Proxy Manager's "Cache Assets"
+// ignores Cache-Control) hands out one release's scripts with another's server; and the
+// version that served it, which the page compares with X-App-Version on every API reply.
+function versionedPage(file) {
+  return fs.readFileSync(file, "utf8")
+    .replace(/(src|href)="(\/?[\w.-]+\.(?:js|css))"/g, (m, attr, url) => `${attr}="${url}?v=${encodeURIComponent(pkg.version)}"`)
+    .replace("<head>", () => `<head>\n  <meta name="app-version" content="${pkg.version.replace(/[^\w.+-]/g, "")}" />`);
+}
+const INDEX_HTML = versionedPage(path.join(__dirname, "public", "index.html"));
+app.get(["/", "/index.html"], (req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache");
+  res.send(INDEX_HTML);
+});
+app.use(express.static(path.join(__dirname, "public")));
+app.use("/api", (req, res, next) => {
+  res.setHeader("X-App-Version", pkg.version);
+  next();
+});
 
 // Small app-wide settings an administrator changes in the UI (today: the update check).
 const APP_SETTINGS_FILE = path.join(DATA_DIR, "app-settings.json");

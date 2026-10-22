@@ -1911,3 +1911,26 @@ body.role-viewer .writer-only {
   color: var(--primary);
   font-weight: 600;
 }
+
+/* Shown when the server runs a newer version than the one that served this page. Floating at
+   the bottom left: clear of the sticky header and of toasts (bottom right), and above the
+   sign-in screen, where a stale page often is. */
+.update-bar {
+  position: fixed;
+  left: calc(16px + env(safe-area-inset-left));
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  z-index: 110;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  padding: 10px 16px;
+  border: 1px solid color-mix(in srgb, var(--primary) 35%, transparent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  background: var(--primary-soft);
+  color: var(--text);
+  font-size: 13px;
+}

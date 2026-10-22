@@ -827,6 +827,8 @@ on the host at all:
    - **Forward Port**: `3000`
    - **Block Common Exploits**: on
    - **Websockets Support**: not needed; the app polls over plain HTTP
+   - **Cache Assets**: safe either way; scripts and styles are addressed by version
+     (`/app.js?v=1.0.0`), and a page left open across an upgrade offers to reload
    - **SSL tab**: request a certificate and turn on **Force SSL** and **HTTP/2**
 
 The proxy's `X-Forwarded-For` is trusted when it comes from a private address (the default

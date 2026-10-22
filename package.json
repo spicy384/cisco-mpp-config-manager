@@ -1,6 +1,6 @@
 {
   "name": "pbx-mpp-config-manager",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Small web app to manage Cisco MPP XML configs on FreePBX via SFTP.",
   "main": "server.js",

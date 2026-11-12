@@ -531,7 +531,7 @@ The container logs which template it resolved at startup, so check `docker compo
 | `DATA_DIR` | `./data` (`/data` in the image) | Where the JSON stores are written |
 | `DEFAULT_TEMPLATE_PATH` | unset | Explicit path to the default template XML |
 | `TZ` | `UTC` | Affects timestamps shown in the change log |
-| `COOKIE_SECURE` | `false` | Set `true` when serving over HTTPS so the session cookie is marked Secure |
+| `COOKIE_SECURE` | `false`; `true` when the app serves HTTPS itself | Set `true` when HTTPS terminates in front (a reverse proxy counts) so the session cookie is marked Secure |
 | `TLS_ENABLED` | `false` | Serve HTTPS using a self-signed certificate generated into `DATA_DIR/tls` |
 | `TLS_HOSTS` | unset | Extra names/IPs for the generated certificate's SANs, comma separated |
 | `TLS_CERT` / `TLS_KEY` | unset | Paths to your own certificate and key; take precedence over `TLS_ENABLED` |
@@ -616,16 +616,39 @@ offers to enrol two-factor straight away.
   on plain HTTP or an IP address the button is simply not shown. The domain and origin are
   taken from the request; `PASSKEY_RP_ID` and `PASSKEY_ORIGIN` override them for a proxy
   that rewrites hosts.
-- **Lockout**: five failed attempts locks an account for 15 minutes.
+- **Lockout**: five failed attempts locks an account for 15 minutes. While it holds, every
+  attempt gets the same answer whatever is typed, so the lock neither confirms a right
+  password nor (names that are not accounts lock the same way) reveals which names exist.
 - **Sessions** last 7 days, or 8 hours idle, and survive a restart. Sign out ends them
   immediately.
+- **Replacing an authenticator** that is already set up takes your password or a current
+  code, as turning two-factor off does, so a stolen session cannot swap in its own.
+- **Security headers** are sent by the app itself, whatever is in front of it: a
+  Content-Security-Policy that allows only the app's own scripts and styles and forbids
+  framing, plus `X-Content-Type-Options`, `Referrer-Policy` and `Permissions-Policy`;
+  `Strict-Transport-Security` is added when the app serves HTTPS or `COOKIE_SECURE=true`.
+  API answers are marked `no-store`.
+- **Saving cannot quietly hit the wrong target.** A save under a name that already exists
+  on the PBX, or with no fields at all, is refused until you confirm it; a browser tab that
+  still shows one PBX after the session moved to another is refused with a notice to
+  reload; and a bulk rollback only runs on the PBX the batch was applied to.
+- **The data files** (servers, change log, audit log, known host keys, snapshots) are
+  written atomically. A file that cannot be read is an error rather than an empty start,
+  so a damaged `known-hosts.json` refuses connections instead of trusting every host anew.
+- **Search and drift patterns** are time-boxed, so an expensive regular expression is
+  refused instead of stalling the app, and tag names are checked before anything is
+  written, so a typo cannot produce malformed XML on a phone.
 
 ### Roles
 | Role | Can do |
 |---|---|
-| Administrator | Everything, plus add/remove users, change roles, reset another user's two-factor and forget a changed SSH host key |
-| User | Connect to a PBX, edit and bulk edit configs, restore, resync, read the change log |
-| Viewer | Connect to a PBX and look: open phones, preview a bulk edit, read history and the change log. Cannot change anything on the PBX or in the app |
+| Administrator | Everything, plus add/remove users, change roles, reset another user's two-factor, forget a changed SSH host key, and manage PBX servers: save, edit and delete profiles (host, sign-in, resync and status commands), connect to a host that is not a saved profile, try a typed resync command, and clear a change log |
+| User | Connect to a saved PBX server, edit and bulk edit configs, restore, resync with the profile's command, read the change log |
+| Viewer | Connect to a saved PBX server and look: open phones, preview a bulk edit, read history and the change log. Cannot change anything on the PBX or in the app |
+
+Server profiles are an administrator's job because they hold commands the app runs on the
+PBX over SSH and decide which host receives the PBX password; a profile is, in effect, a
+shell on that machine.
 
 Roles are enforced by the server on every request, not just hidden in the interface. An
 administrator sets a role when adding an account and can change it later from **Settings > Users**;

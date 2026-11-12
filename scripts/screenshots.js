@@ -103,7 +103,7 @@ async function waitForServer() {
     for (const proxy of ["10.0.0.2:5060", "10.0.0.1:5060"]) {
       const cur = await req(`/api/files/${PHONES[0][0]}`);
       const entries = cur.entries.map((e) => (e.key === "Proxy_1_" ? { ...e, value: proxy } : e));
-      await req(`/api/files/${PHONES[0][0]}`, { method: "POST", body: JSON.stringify({ rootKey: "flat-profile", entries }) });
+      await req(`/api/files/${PHONES[0][0]}`, { method: "POST", body: JSON.stringify({ rootKey: "flat-profile", entries, expectedVersion: cur.version }) });
     }
     const job = await req("/api/bulk-edit", { method: "POST", body: JSON.stringify({ fileNames: PHONES.slice(0, 4).map((p) => p[0]), key: "Time_Zone", value: "GMT+01:00", mode: "set", dryRun: false }) });
     for (;;) { const j = await req(`/api/bulk-edit/${job.jobId}`); if (j.status !== "running") break; await new Promise((r) => setTimeout(r, 50)); }

@@ -27,9 +27,11 @@ services:
       # DEFAULT_TEMPLATE_PATH: /data/default-template.xml
       TZ: ${TZ:-UTC}
 
-      # Set true once HTTPS terminates in front of this, so the session cookie is marked
-      # Secure. Leave false on plain HTTP or sign-in will not work at all.
-      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Set true once HTTPS terminates in front of this (a reverse proxy counts), so the
+      # session cookie is marked Secure; false on plain HTTP, or sign-in will not work at
+      # all. Left unset, the cookie is Secure exactly when the app serves HTTPS itself
+      # (TLS_ENABLED or your own certificate below).
+      COOKIE_SECURE: ${COOKIE_SECURE:-}
 
       # Which proxies may set X-Forwarded-For, so the sign-in throttle and the audit log see
       # each client's address rather than the proxy's. Unset means a proxy on this host or a

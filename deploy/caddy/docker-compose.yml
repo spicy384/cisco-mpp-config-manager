@@ -1,8 +1,18 @@
-# PBX MPP Config Manager behind Caddy on the same host.
+# PBX MPP Config Manager behind Caddy on the same host, over HTTPS.
 #
-# Caddy obtains and renews a Let's Encrypt certificate automatically and proxies
-# to the app over the internal Docker network. The app itself publishes no ports,
-# so the only way in is through Caddy over HTTPS.
+# Caddy terminates TLS and proxies to the app over the internal Docker network. The
+# app itself publishes no ports, so the only way in is through Caddy over HTTPS.
+#
+# One setting in .env, PBX_TLS, chooses the certificate:
+#
+#   self-signed      PBX_TLS=internal
+#                    Works anywhere, including for an IP address or an internal name.
+#                    Browsers warn until Caddy's root certificate is trusted.
+#   Let's Encrypt    PBX_TLS=you@example.com
+#                    A trusted certificate, obtained and renewed automatically. Needs
+#                    a real domain pointing at this host and inbound TCP 80 and 443.
+#   your own         PBX_TLS=/certs/fullchain.pem /certs/privkey.pem
+#                    Any certificate you already have, mounted from PBX_CERT_DIR.
 #
 # No source checkout is needed, only these three files:
 #
@@ -10,15 +20,10 @@
 #   curl -fsSLO https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/caddy/docker-compose.yml
 #   curl -fsSLO https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/caddy/Caddyfile
 #   curl -fsSL  https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/caddy/.env.example -o .env
-#   nano .env                # set your domain and email
+#   nano .env                # set PBX_DOMAIN and choose PBX_TLS
 #   docker compose up -d
 #
 # Update: docker compose pull && docker compose up -d
-#
-# Requirements for automatic certificates:
-#   - a real domain whose DNS A/AAAA record points at this host
-#   - inbound TCP 80 and 443 reachable from the internet
-# If you cannot meet those, see the notes in Caddyfile for internal-only options.
 
 services:
   caddy:
@@ -26,22 +31,28 @@ services:
     container_name: pbx-caddy
     restart: unless-stopped
 
-    # 80 is needed for the ACME challenge and the HTTP->HTTPS redirect.
+    # 80 carries the HTTP->HTTPS redirect and, for Let's Encrypt, the ACME challenge.
     ports:
       - "80:80"
       - "443:443"
       - "443:443/udp"   # HTTP/3
 
     environment:
-      # Consumed by the Caddyfile.
+      # Both are consumed by the Caddyfile. PBX_DOMAIN is the name (or IP address)
+      # people type; PBX_TLS chooses the certificate, as described at the top.
       PBX_DOMAIN: ${PBX_DOMAIN:?set PBX_DOMAIN in .env}
-      ACME_EMAIL: ${ACME_EMAIL:-}
+      # Without PBX_TLS: Let's Encrypt if ACME_EMAIL is set (what this example used
+      # before it had modes), otherwise self-signed.
+      PBX_TLS: ${PBX_TLS:-${ACME_EMAIL:-internal}}
 
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      # caddy_data holds the issued certificates and the ACME account key.
-      # Losing it forces re-issuance, and Let's Encrypt rate limits apply
-      # (5 identical certificates per week), so keep this volume.
+      # Only read in "your own certificate" mode; an empty folder is created otherwise.
+      - ${PBX_CERT_DIR:-./certs}:/certs:ro
+      # caddy_data holds what Caddy issues: Let's Encrypt certificates and the ACME
+      # account key, or its own CA and the root certificate to trust. Keep this
+      # volume: losing it forces re-issuance (Let's Encrypt allows 5 identical
+      # certificates per week) or a new root that every browser has to trust again.
       - caddy_data:/data
       - caddy_config:/config
 

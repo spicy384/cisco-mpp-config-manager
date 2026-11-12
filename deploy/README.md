@@ -11,7 +11,7 @@ but nothing is built from it.
 | Setup | Use when | HTTPS handled by |
 |---|---|---|
 | [`../docker-compose.yml`](../docker-compose.yml) | Simplest. You reach it on the server itself, or over an SSH tunnel | Nothing - plain HTTP on loopback |
-| [`caddy/`](caddy) | You have a domain and this host can be reached on 80/443 | Caddy, automatic Let's Encrypt |
+| [`caddy/`](caddy) | You want HTTPS on this host with nothing else in front | Caddy: self-signed, Let's Encrypt, or your own certificate |
 | [`external-proxy/`](external-proxy) | Your proxy (Nginx Proxy Manager, etc.) runs on **another host** | The proxy for browsers; the app's own self-signed cert for the hop to it |
 
 All three run the same image. The differences are only in what is exposed and who
@@ -22,43 +22,88 @@ release instead of following `latest`, set `PBX_VERSION=1.0.3` (or whichever) in
 
 ---
 
-## caddy/ - one host, automatic certificates
+## caddy/ - one host, HTTPS from Caddy
 
-Caddy gets a Let's Encrypt certificate, renews it, and proxies to the app over an
-internal Docker network. **The app publishes no ports**, so the only route in is
-through Caddy over HTTPS.
+Caddy terminates HTTPS and proxies to the app over an internal Docker network. **The app
+publishes no ports**, so the only route in is through Caddy over HTTPS, and HTTP is
+redirected to it.
 
 ```bash
 mkdir -p ~/pbx-manager && cd ~/pbx-manager
 curl -fsSLO https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/caddy/docker-compose.yml
 curl -fsSLO https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/caddy/Caddyfile
 curl -fsSL  https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/caddy/.env.example -o .env
-nano .env                 # set PBX_DOMAIN and ACME_EMAIL
+nano .env                 # set PBX_DOMAIN and choose PBX_TLS
 docker compose up -d
 ```
 
 (From a clone: `cd deploy/caddy && cp .env.example .env`, edit, `docker compose up -d`.)
 
-Needs a real domain pointing at this host and inbound TCP 80 and 443. Caddy uses
-80 for the ACME challenge and for redirecting HTTP to HTTPS.
+One line in `.env`, `PBX_TLS`, chooses the certificate. Switch between them at any time
+by editing it and running `docker compose up -d` again.
 
-Watch the first start - certificate issuance takes a few seconds:
+| Certificate | `PBX_TLS` | Needs | Browsers |
+|---|---|---|---|
+| Self-signed | `internal` | Nothing. Works for a domain, an internal name or an IP address | Warn until Caddy's root certificate is trusted |
+| Let's Encrypt | your email address | A real domain pointing at this host; inbound TCP 80 and 443 from the internet | Trusted |
+| Your own | `/certs/fullchain.pem /certs/privkey.pem` | The certificate and key in the folder named by `PBX_CERT_DIR` | Whatever your certificate is |
+
+### Self-signed
+Caddy runs its own small certificate authority and issues the site's certificate from it,
+renewing it by itself. To stop the browser warning, trust that authority's root once on each
+machine that uses the app:
+
+```bash
+docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
+```
+
+Import `caddy-root.crt` as a trusted root (Windows: double-click, *Install Certificate*,
+*Trusted Root Certification Authorities*; macOS: Keychain Access, then *Always Trust*).
+**Keep the `caddy_data` volume**: deleting it creates a new authority that has to be
+trusted all over again.
+
+### Let's Encrypt
+Set `PBX_TLS` to your email address. It is registered with the certificate authority as
+your account contact the moment the container starts, so use a real one and set
+`PBX_DOMAIN` first. Caddy asks Let's Encrypt and, if that cannot issue, falls back to
+ZeroSSL, its other built-in authority; either way the certificate is trusted and renewed
+automatically. Watch the first start, since issuance takes a few seconds:
 
 ```bash
 docker compose logs -f caddy
 ```
 
-Because the proxy and the app share a host, the hop between them never touches the
-network, so the app runs plain HTTP internally and `TLS_ENABLED` stays off.
+Caddy uses port 80 for the ACME challenge, so both 80 and 443 must reach this host from the
+internet. **Keep the `caddy_data` volume**: it holds the certificates and the account key,
+and Let's Encrypt allows only 5 identical certificates per week.
 
-**Keep the `caddy_data` volume.** It holds the certificates and the ACME account
-key. Deleting it forces re-issuance, and Let's Encrypt allows only 5 identical
-certificates per week.
+If the host is not reachable from the internet, Let's Encrypt cannot validate the domain
+this way. Obtain the certificate elsewhere (certbot with DNS-01 needs no inbound access)
+and use the next mode, or see the note at the end of the `Caddyfile` about a DNS plugin.
 
-If this host is not reachable from the internet, Let's Encrypt cannot validate the
-domain. The `Caddyfile` documents two alternatives: `tls internal` (Caddy's own CA,
-real HTTPS but browsers warn until you trust its root), or DNS-01 validation with a
-Caddy image built with your DNS provider's plugin.
+### Your own certificate
+Put the certificate (with its chain) and the private key in a folder, set `PBX_CERT_DIR`
+to it, and give `PBX_TLS` the two paths as they appear inside the container, under
+`/certs`:
+
+```bash
+PBX_TLS=/certs/fullchain.pem /certs/privkey.pem
+PBX_CERT_DIR=./certs
+```
+
+For certificates kept by certbot, mount the whole of `/etc/letsencrypt`. The files in
+`live/` are links into `archive/`, so mounting `live/<domain>` alone leaves them broken:
+
+```bash
+PBX_TLS=/certs/live/pbx.example.com/fullchain.pem /certs/live/pbx.example.com/privkey.pem
+PBX_CERT_DIR=/etc/letsencrypt
+```
+
+Caddy reads the files when it starts, so after a renewal run `docker compose restart caddy`
+(a certbot `--deploy-hook` is a good place for it).
+
+In every mode the proxy and the app share a host, so the hop between them never touches the
+network: the app runs plain HTTP internally and `TLS_ENABLED` stays off.
 
 ---
 

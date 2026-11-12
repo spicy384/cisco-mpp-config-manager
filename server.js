@@ -44,11 +44,26 @@ function resolveDefaultTemplatePath() {
 const MAX_LOG_ENTRIES_PER_SCOPE = 2000;
 
 // Which proxies may set X-Forwarded-For (and so what req.ip means for the sign-in
-// throttle and the audit log). The default trusts a proxy on this host or on a private
-// network; TRUST_PROXY takes Express's forms: "false", a hop count, or a comma-separated
-// list of addresses/CIDRs/"loopback"/"uniquelocal".
-const TRUST_PROXY = process.env.TRUST_PROXY === undefined || process.env.TRUST_PROXY === "" ? "loopback, uniquelocal" : process.env.TRUST_PROXY;
+// throttle and the audit log). Believing the header is opt-in: by default only a proxy
+// on this same host is trusted, so a client elsewhere on the network cannot name its
+// own address (and with it dodge the throttle or write a false one into the audit
+// log). A proxy on another machine has to be named: TRUST_PROXY takes Express's forms,
+// "false", a hop count, or a comma-separated list of addresses/CIDRs/"loopback"/
+// "uniquelocal".
+const DEFAULT_TRUST_PROXY = "loopback";
+const TRUST_PROXY = process.env.TRUST_PROXY === undefined || process.env.TRUST_PROXY === "" ? DEFAULT_TRUST_PROXY : process.env.TRUST_PROXY;
 app.set("trust proxy", /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY === "false" ? false : TRUST_PROXY === "true" ? true : TRUST_PROXY);
+
+/** The boot log's line about it, so what is in force never has to be guessed. */
+function describeTrustProxy() {
+  if (TRUST_PROXY === DEFAULT_TRUST_PROXY) {
+    return "Trust proxy: loopback (X-Forwarded-For from other hosts is ignored; set TRUST_PROXY to your proxy's address to use it)";
+  }
+  if (TRUST_PROXY === "false") {
+    return "Trust proxy: false (X-Forwarded-For is ignored)";
+  }
+  return `Trust proxy: ${TRUST_PROXY}`;
+}
 app.disable("x-powered-by");
 
 const vm = require("vm");
@@ -333,6 +348,10 @@ const AUDIT_RULES = [
   { method: "DELETE", path: /^\/api\/ssh-key$/, action: "ssh-key-removed" },
   { method: "PUT", path: /^\/api\/version\/settings$/, action: "update-check",
     describe: (req) => ({ detail: req.body?.enabled ? "switched on" : "switched off" }) },
+  { method: "PUT", path: /^\/api\/settings\/privacy$/, action: "privacy-setting",
+    describe: (req, res) => ({
+      detail: res.statusCode < 400 ? (req.body?.maskSecretsForViewers ? "viewers see passwords masked" : "viewers see passwords in full") : undefined
+    }) },
   { method: "POST", path: /^\/api\/known-hosts\/forget$/, action: "host-key-forgotten",
     describe: (req) => ({ target: `${String(req.body?.host || "").trim()}:${Number(req.body?.port) || 22}` }) },
   { method: "DELETE", path: /^\/api\/logs\/(.+)$/, action: "change-log-cleared",
@@ -695,12 +714,75 @@ function buildLogScope(conn) {
   };
 }
 
-// Tags whose values must never be written to the change log.
-const SENSITIVE_TAG = /passwd|password|passphrase|secret/i;
+// --- secrets -----------------------------------------------------------------------
+// One place decides which settings are secret and how their values are hidden, so the
+// change log, Find, the drift report and what a viewer is shown can never disagree.
+//
+// Tags whose whole value is a secret: passwords in their several spellings, secrets,
+// credentials, PINs and tokens (as a word of the name, so "Ping" and "Mapping" are not
+// caught), SNMP community strings, and keys. "Key" alone is not enough: line keys,
+// expansion-module keys (Unit_1_Key_1_), soft-key lists and the programmable soft keys
+// (PSK_1_) are named with it and are the bulk of an everyday config, so a key counts
+// only when the word before it says it is a cryptographic one.
+const SENSITIVE_TAG = new RegExp([
+  "passw(?:or)?d",
+  "pwd",
+  "passphrase",
+  "secret",
+  "credential",
+  "community",
+  "(?:^|[_-])pin(?:[_-]|$)",
+  "(?:^|[_-])token(?:[_-]|$)",
+  "(?:private|priv|privacy|auth|shared|wep|wpa|srtp|encryption|encrypt|cipher|api|master|session|symmetric|hmac|aes|acs|tr[-_]?069)[-_]?key"
+].join("|"), "i");
+// Tags that hold an address or a provisioning rule. The value as a whole is not
+// secret, but it can carry sign-in details: user:password@ in a URL, a --key or --pwd
+// option in a profile rule, a password in a query string. Only those parts are hidden.
+const CREDENTIAL_CARRIER_TAG = /rule|url|uri|script/i;
+// What stands in for a secret in the change log and in Find and drift results, which
+// hide them from everyone...
 const REDACTED = "(hidden)";
+// ...and in what a viewer is shown while masking for viewers is on.
+const SECRET_MASK = "********";
 
+/** Whether the whole value of this tag is a secret. */
 function isSensitiveTag(tag) {
   return Boolean(tag) && SENSITIVE_TAG.test(String(tag));
+}
+
+/** Whether this tag's value may carry sign-in details inside it. */
+function carriesCredentials(tag) {
+  return Boolean(tag) && !isSensitiveTag(tag) && CREDENTIAL_CARRIER_TAG.test(String(tag));
+}
+
+/** The sign-in details inside an address or rule replaced by `token`, the rest left readable. */
+function scrubCredentials(text, token = SECRET_MASK) {
+  return String(text)
+    // scheme://user:password@host -> scheme://********@host
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\/\s@"'<>\]]*@/gi, (match, scheme) => `${scheme}${token}@`)
+    // --key secret, --pwd "two words"
+    .replace(/(--(?:key|pwd|password|passwd|pass)\s+)(?:"[^"]*"|'[^']*'|[^\s\])]+)/gi, (match, option) => `${option}${token}`)
+    // ?password=secret&...
+    .replace(/([?&;](?:password|passwd|pwd|pass|key|token|secret|auth)=)[^&;\s"'\]]+/gi, (match, name) => `${name}${token}`);
+}
+
+/**
+ * The one helper everything hides secrets with. Returns { value, hidden }: the value
+ * as it may be shown, and whether anything was taken out of it. An empty value is
+ * left as it is, so "cleared" stays distinguishable from "set" and reveals nothing.
+ */
+function hideSecret(tag, value, token = SECRET_MASK) {
+  if (value === null || value === undefined || value === "") {
+    return { value, hidden: false };
+  }
+  if (isSensitiveTag(tag)) {
+    return { value: token, hidden: true };
+  }
+  if (carriesCredentials(tag)) {
+    const scrubbed = scrubCredentials(value, token);
+    return { value: scrubbed === String(value) ? value : scrubbed, hidden: scrubbed !== String(value) };
+  }
+  return { value, hidden: false };
 }
 
 /**
@@ -709,15 +791,82 @@ function isSensitiveTag(tag) {
  * is useful when auditing and reveals nothing.
  */
 function redactSensitiveEntry(entry) {
-  if (!isSensitiveTag(entry.tag)) {
+  if (!entry || (!isSensitiveTag(entry.tag) && !carriesCredentials(entry.tag))) {
     return entry;
   }
 
   return {
     ...entry,
-    before: entry.before ? REDACTED : entry.before,
-    after: entry.after ? REDACTED : entry.after
+    before: hideSecret(entry.tag, entry.before, REDACTED).value,
+    after: hideSecret(entry.tag, entry.after, REDACTED).value
   };
+}
+
+// --- what a viewer is shown -------------------------------------------------------
+// An administrator decides whether read-only accounts see secrets (Settings). Masked
+// is the default, and also what an unreadable settings file means: the setting is read
+// strictly, so a request fails rather than show what it should not.
+
+/** The administrator's setting: true unless it has been switched off. */
+function maskSecretsForViewers() {
+  return getAppSetting("maskSecretsForViewers") !== false;
+}
+
+/** Whether this request's caller is shown secrets masked. */
+function secretsMaskedFor(req) {
+  return Boolean(req && req.user && req.user.role === "viewer") && maskSecretsForViewers();
+}
+
+function privacyInfo(req) {
+  const on = maskSecretsForViewers();
+  return { maskSecretsForViewers: on, masked: on && Boolean(req.user && req.user.role === "viewer") };
+}
+
+/** Entries with every secret value masked and marked. `count` says how many were. */
+function maskEntries(entries) {
+  let count = 0;
+  const masked = (Array.isArray(entries) ? entries : []).map((entry) => {
+    const shown = hideSecret(entry && entry.key, entry && entry.value);
+    if (!shown.hidden) {
+      return entry;
+    }
+    count += 1;
+    return { ...entry, value: shown.value, masked: true };
+  });
+  return { entries: masked, count };
+}
+
+/** A field-level diff (see diffEntriesForLog) with secret values masked and marked. */
+function maskDiff(changes) {
+  let count = 0;
+  const masked = (Array.isArray(changes) ? changes : []).map((change) => {
+    const before = hideSecret(change.key, change.before);
+    const after = hideSecret(change.key, change.after);
+    if (!before.hidden && !after.hidden) {
+      return change;
+    }
+    count += 1;
+    return { ...change, before: before.value, after: after.value, masked: true };
+  });
+  return { changes: masked, count };
+}
+
+/**
+ * A config file as a masked viewer may see it. The XML is rebuilt from the masked
+ * entries rather than edited in place, so nothing the file holds outside them (a
+ * comment, a nested element) can carry a secret through, and the version is that of
+ * the masked text: a hash of the real file would let its secrets be guessed at offline.
+ */
+function maskedFileView(rootKey, entries, xmlText) {
+  const { entries: shown, count } = maskEntries(entries);
+  const masked = entriesToXml(rootKey, shown, { declaration: xmlDeclarationOf(xmlText) });
+  return { entries: shown, xmlText: masked, version: contentVersion(masked), count };
+}
+
+/** A stored version's details without the hash of its real content, for the same reason. */
+function withoutContentHash(version) {
+  const { sha256, ...rest } = version || {};
+  return rest;
 }
 
 /**
@@ -1239,7 +1388,76 @@ function summarizeResults(results) {
   }, {});
 }
 
-function jobToJson(job) {
+/**
+ * One result row of a bulk edit with its secret values masked. The row's own
+ * previousValues and newValue belong to the first tag changed (the only one, for a
+ * single-tag edit), and each entry of `changes` names its tag.
+ */
+function maskBulkResult(item, jobKey) {
+  let hidden = false;
+  const hide = (tag, value) => {
+    const shown = hideSecret(tag, value);
+    hidden = hidden || shown.hidden;
+    return shown.value;
+  };
+  const rowTag = (Array.isArray(item.changes) && item.changes[0] && item.changes[0].tag) || jobKey;
+
+  const out = { ...item };
+  if (Array.isArray(item.previousValues)) {
+    out.previousValues = item.previousValues.map((value) => hide(rowTag, value));
+  }
+  if (item.newValue !== undefined) {
+    out.newValue = hide(jobKey, item.newValue);
+  }
+  if (Array.isArray(item.changes)) {
+    out.changes = item.changes.map((change) => {
+      const before = hideSecret(change.tag, change.before);
+      const after = hideSecret(change.tag, change.after);
+      const previous = Array.isArray(change.previousValues) ? change.previousValues.map((value) => hideSecret(change.tag, value)) : null;
+      if (!before.hidden && !after.hidden && !(previous && previous.some((p) => p.hidden))) {
+        return change;
+      }
+      hidden = true;
+      return {
+        ...change,
+        before: before.value,
+        after: after.value,
+        ...(previous ? { previousValues: previous.map((p) => p.value) } : {}),
+        masked: true
+      };
+    });
+  }
+  return hidden ? { ...out, masked: true } : item;
+}
+
+/**
+ * A job as the API reports it. `maskFor` is the username of a caller who is shown
+ * secrets masked (see secretsMaskedFor), or null for everyone else: a job is polled
+ * by id, so one started by somebody who may see passwords can be read by somebody
+ * who may not.
+ */
+function jobToJson(job, { maskFor = null } = {}) {
+  let results = job.results;
+  let criteria = job.request.criteria || null;
+  let secretsMasked = false;
+
+  if (maskFor !== null) {
+    // Only a bulk edit's rows carry values as they are in the files; Find and the
+    // drift report hide secrets from everyone as they collect, and the rest carry none.
+    if (BULK_EDIT_MODES.has(job.mode)) {
+      results = job.results.map((item) => {
+        const shown = maskBulkResult(item, job.key);
+        secretsMasked = secretsMasked || shown !== item;
+        return shown;
+      });
+    }
+    // What someone else searched for may itself be a password they were looking for.
+    if (criteria && job.mode === "find" && criteria.value && job.request.user !== maskFor) {
+      criteria = { ...criteria, value: SECRET_MASK, masked: true };
+      secretsMasked = true;
+    }
+  }
+
   return {
     jobId: job.id,
     status: job.status,
@@ -1249,7 +1467,7 @@ function jobToJson(job) {
     total: job.total,
     processed: job.processed,
     currentFile: job.currentFile,
-    results: job.results,
+    results,
     summary: summarizeResults(job.results),
     error: job.error || null,
     startedAt: job.startedAt,
@@ -1257,11 +1475,12 @@ function jobToJson(job) {
     rollbackOf: job.request.rollbackOf || null,
     unmatched: job.unmatched || 0,
     sourceLabel: job.sourceLabel || null,
-    criteria: job.request.criteria || null,
+    criteria,
     resync: Boolean(job.request.resync),
     stage: job.stage || "write",
     resyncTotal: job.resyncTotal || 0,
-    resyncDone: job.resyncDone || 0
+    resyncDone: job.resyncDone || 0,
+    ...(secretsMasked ? { secretsMasked: true } : {})
   };
 }
 
@@ -1688,8 +1907,15 @@ function buildSearchCriteria({ tag, value, mode } = {}) {
   return { tag: tagText, value: valueText, mode: matchMode, tagTest, valueTest, valueTestMany };
 }
 
-/** The entries of one file that satisfy the criteria, as { tag, value }. */
-function matchEntries(entries, criteria) {
+/**
+ * The entries of one file that satisfy the criteria, as { tag, value }.
+ *
+ * With `hideSecrets` (a search by someone who is shown secrets masked) a value test
+ * never sees a secret: a password tag cannot match by value at all, and an address
+ * is tested with its sign-in details taken out. Otherwise "does any password start
+ * with a?" would answer yes or no, and enough such questions spell the password out.
+ */
+function matchEntries(entries, criteria, { hideSecrets = false } = {}) {
   const named = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
     const key = String(entry?.key || "");
@@ -1697,17 +1923,29 @@ function matchEntries(entries, criteria) {
     if (criteria.tagTest && !criteria.tagTest(key)) {
       continue;
     }
+    if (hideSecrets && criteria.valueTest) {
+      if (isSensitiveTag(key)) {
+        continue;
+      }
+      if (carriesCredentials(key)) {
+        named.push({ tag: key, value, tested: scrubCredentials(value) });
+        continue;
+      }
+    }
     named.push({ tag: key, value });
   }
 
   if (!criteria.valueTest || named.length === 0) {
     return named;
   }
-  if (criteria.valueTestMany) {
-    const hits = criteria.valueTestMany(named.map((item) => item.value));
-    return named.filter((item, index) => hits[index]);
-  }
-  return named.filter((item) => criteria.valueTest(item.value));
+  const tested = (item) => (item.tested === undefined ? item.value : item.tested);
+  const found = criteria.valueTestMany
+    ? (() => {
+      const hits = criteria.valueTestMany(named.map(tested));
+      return named.filter((item, index) => hits[index]);
+    })()
+    : named.filter((item) => criteria.valueTest(tested(item)));
+  return found.map((item) => ({ tag: item.tag, value: item.value }));
 }
 
 /** Read-only scan of every config on the PBX. Results hold only the files that matched. */
@@ -1731,7 +1969,7 @@ async function runSearchJob(job) {
     ensureConnected();
     try {
       const { entries } = xmlToEntries(await readRemoteText(path.posix.join(remoteDir, fileName), { size: sizes.get(fileName) }));
-      const matches = matchEntries(entries, criteria);
+      const matches = matchEntries(entries, criteria, { hideSecrets: job.request.hideSecrets === true });
 
       if (matches.length === 0) {
         job.unmatched += 1;
@@ -1746,7 +1984,7 @@ async function runSearchJob(job) {
         // Same rule as the change log: a password's presence is shown, its value is not.
         matches: matches.slice(0, MAX_SEARCH_MATCHES_PER_FILE).map((m) => ({
           tag: m.tag,
-          value: isSensitiveTag(m.tag) && m.value ? REDACTED : m.value
+          value: hideSecret(m.tag, m.value, REDACTED).value
         }))
       });
     } catch (error) {
@@ -2039,7 +2277,7 @@ async function runDriftJob(job) {
         continue;
       }
 
-      const redact = (tag, value) => (value && isSensitiveTag(tag) ? REDACTED : value);
+      const redact = (tag, value) => hideSecret(tag, value, REDACTED).value;
       job.results.push({
         name: fileName,
         station: findStationDisplayNameInEntries(entries),
@@ -2356,6 +2594,16 @@ app.post("/api/bulk-edit", (req, res) => {
         return res.status(400).json({ error: `Unknown mode: ${editMode}` });
       }
 
+      // A preview answers "unchanged" when the value typed is the one already there,
+      // which for a secret is a yes-or-no answer to a guess. Someone who is shown
+      // secrets masked cannot apply the edit anyway, so they do not preview it either.
+      if (secretsMaskedFor(req) && (isSensitiveTag(targetKey) || carriesCredentials(targetKey))) {
+        return res.status(403).json({
+          error: `${targetKey} holds a secret, and secrets are masked for this account, so a change to it cannot be previewed.`,
+          secretsMasked: true
+        });
+      }
+
       edits.push({
         key: targetKey,
         mode: editMode,
@@ -2444,6 +2692,8 @@ app.post("/api/search", (req, res) => {
       error: null,
       request: {
         criteria: { tag: criteria.tag, value: criteria.value, mode: criteria.mode },
+        // See matchEntries: a masked viewer's search may not test secrets by value.
+        hideSecrets: secretsMaskedFor(req),
         remoteDir: pbx.connection.remoteDir,
         scope: buildLogScope(pbx.connection),
         user: req.user ? req.user.username : ""
@@ -2655,7 +2905,7 @@ app.get("/api/bulk-edit/:jobId", (req, res) => {
     return res.status(404).json({ error: "Job not found or expired." });
   }
 
-  return res.json(jobToJson(job));
+  return res.json(jobToJson(job, { maskFor: secretsMaskedFor(req) ? req.user.username : null }));
 });
 
 // Lists every server we hold history for, including ones not currently connected.
@@ -2698,8 +2948,10 @@ app.get("/api/logs/:scopeKey", (req, res) => {
     label: bucket.label || key,
     host: bucket.host || "",
     remoteDir: bucket.remoteDir || "",
-    // Newest first for display.
-    entries: [...entries].reverse()
+    // Newest first for display. Secrets were hidden when each entry was written; they
+    // are hidden again on the way out, so an entry written before the list of secret
+    // settings grew does not show what would be hidden today.
+    entries: [...entries].reverse().map(redactSensitiveEntry)
   });
 });
 
@@ -2769,7 +3021,13 @@ app.get("/api/templates", (req, res) => {
     .map((t) => ({ id: t.id, name: t.name, rootKey: t.rootKey }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  res.json({ templates: [defaults, ...custom] });
+  // The built-in template is listed with its entries, values included.
+  if (secretsMaskedFor(req)) {
+    const shown = maskEntries(defaults.entries);
+    return res.json({ templates: [{ ...defaults, entries: shown.entries }, ...custom], ...(shown.count ? { secretsMasked: true } : {}) });
+  }
+
+  return res.json({ templates: [defaults, ...custom] });
 });
 
 app.get("/api/templates/:id", (req, res) => {
@@ -2778,13 +3036,14 @@ app.get("/api/templates/:id", (req, res) => {
     return res.status(400).json({ error: "Template id is required." });
   }
 
-  if (id === "default") {
-    return res.json(getDefaultTemplate());
-  }
-
-  const template = loadTemplates().find((t) => t.id === id);
+  const template = id === "default" ? getDefaultTemplate() : loadTemplates().find((t) => t.id === id);
   if (!template) {
     return res.status(404).json({ error: "Template not found." });
+  }
+
+  if (secretsMaskedFor(req)) {
+    const shown = maskEntries(template.entries);
+    return res.json({ ...template, entries: shown.entries, ...(shown.count ? { secretsMasked: true } : {}) });
   }
 
   return res.json(template);
@@ -3075,6 +3334,23 @@ app.put("/api/version/settings", authGuard.requireAdmin, async (req, res) => {
   res.json(versionInfo());
 });
 
+// --- what viewers are shown -----------------------------------------------------
+
+/** The setting, and whether the caller's own view is masked by it. Any signed-in role may ask. */
+app.get("/api/settings/privacy", (req, res) => {
+  res.json(privacyInfo(req));
+});
+
+/** Switches masking of secrets for viewers on or off. Users and administrators always see full values. */
+app.put("/api/settings/privacy", authGuard.requireAdmin, (req, res) => {
+  const wanted = req.body ? req.body.maskSecretsForViewers : undefined;
+  if (typeof wanted !== "boolean") {
+    return res.status(400).json({ error: "maskSecretsForViewers must be true or false." });
+  }
+  setAppSetting("maskSecretsForViewers", wanted);
+  return res.json(privacyInfo(req));
+});
+
 app.get("/api/status", (req, res) => {
   const connection = pbx.connection;
   const lost = pbx.lastDisconnect;
@@ -3193,7 +3469,15 @@ app.get("/api/files/:name", async (req, res) => {
 
     const { rootKey, entries } = xmlToEntries(xmlText);
 
-    res.json({ fileName, rootKey, entries, xmlText, version: contentVersion(xmlText), model: getPhoneModel(fileName) });
+    if (secretsMaskedFor(req)) {
+      const view = maskedFileView(rootKey, entries, xmlText);
+      return res.json({
+        fileName, rootKey, entries: view.entries, xmlText: view.xmlText, version: view.version, model: getPhoneModel(fileName),
+        ...(view.count ? { secretsMasked: true } : {})
+      });
+    }
+
+    return res.json({ fileName, rootKey, entries, xmlText, version: contentVersion(xmlText), model: getPhoneModel(fileName) });
   } catch (error) {
     sendError(res, error);
   }
@@ -3549,7 +3833,8 @@ app.get("/api/files/:name/history", (req, res) => {
     const fileName = sanitizeFileName(req.params.name);
     const scope = buildLogScope(pbx.connection);
 
-    res.json({ fileName, keep: SNAPSHOT_KEEP, versions: snapshots.list(scope.key, fileName) });
+    const versions = snapshots.list(scope.key, fileName);
+    res.json({ fileName, keep: SNAPSHOT_KEEP, versions: secretsMaskedFor(req) ? versions.map(withoutContentHash) : versions });
   } catch (error) {
     sendError(res, error);
   }
@@ -3576,14 +3861,31 @@ app.get("/api/files/:name/history/:id", async (req, res) => {
     }
 
     const { content, ...version } = snapshot;
-    res.json({
+    const diff = current ? diffEntriesForLog(current, restored.entries) : [];
+
+    if (secretsMaskedFor(req)) {
+      const view = maskedFileView(restored.rootKey, restored.entries, content);
+      const shownDiff = maskDiff(diff);
+      return res.json({
+        fileName,
+        version: withoutContentHash(version),
+        rootKey: restored.rootKey,
+        entries: view.entries,
+        xmlText: view.xmlText,
+        currentExists: current !== null,
+        diff: shownDiff.changes,
+        ...(view.count || shownDiff.count ? { secretsMasked: true } : {})
+      });
+    }
+
+    return res.json({
       fileName,
       version,
       rootKey: restored.rootKey,
       entries: restored.entries,
       xmlText: content,
       currentExists: current !== null,
-      diff: current ? diffEntriesForLog(current, restored.entries) : []
+      diff
     });
   } catch (error) {
     sendError(res, error);
@@ -3856,6 +4158,7 @@ if (require.main === module) {
   server.listen(PORT, () => {
     console.log(`PBX MPP Config Manager running at ${scheme}://localhost:${PORT}`);
     console.log(`Data directory: ${DATA_DIR}`);
+    console.log(describeTrustProxy());
     console.log(`Version: ${pkg.version}${process.env.APP_COMMIT ? ` (${String(process.env.APP_COMMIT).slice(0, 7)})` : ""}; update check ${updates.describe().enabled ? `daily against ${updates.describe().image}` : UPDATE_CHECK_ALLOWED ? "off (switched off under Settings)" : "off (UPDATE_CHECK=false)"}.`);
     updates.start();
 
@@ -3929,6 +4232,12 @@ module.exports = {
   buildSaveLogEntries,
   diffEntriesForLog,
   isSensitiveTag,
+  carriesCredentials,
+  scrubCredentials,
+  hideSecret,
+  maskEntries,
+  SECRET_MASK,
+  describeTrustProxy,
   redactSensitiveEntry,
   xmlToEntries,
   BULK_EDIT_MODES

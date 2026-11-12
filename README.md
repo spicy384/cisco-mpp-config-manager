@@ -541,7 +541,7 @@ The container logs which template it resolved at startup, so check `docker compo
 | `SSH_KEY_FILE` | unset | Path to your own SSH private key, instead of one the app creates |
 | `UPDATE_CHECK` | `true` | `false` switches off the daily look at the registry for a newer image and locks the Settings checkbox |
 | `UPDATE_IMAGE` | `ghcr.io/spicy384/cisco-mpp-config-manager` | The image whose tags the update check compares against, if you publish under another name |
-| `TRUST_PROXY` | `loopback, uniquelocal` | Which proxies may set `X-Forwarded-For` (so what the client address is for the sign-in throttle and the audit log): `false`, a hop count, or addresses/CIDRs, as Express takes them |
+| `TRUST_PROXY` | `loopback` | Whose `X-Forwarded-For` to believe (so what the client address is for the sign-in throttle and the audit log): your proxy's address or a CIDR, a hop count, `uniquelocal` for any private network, or `false`. Unset, only a proxy on the same host is believed |
 | `PROXY_USER_HEADER` | `remote-user` | Which header carries the username in that mode |
 
 ### Updating
@@ -644,11 +644,21 @@ offers to enrol two-factor straight away.
 |---|---|
 | Administrator | Everything, plus add/remove users, change roles, reset another user's two-factor, forget a changed SSH host key, and manage PBX servers: save, edit and delete profiles (host, sign-in, resync and status commands), connect to a host that is not a saved profile, try a typed resync command, and clear a change log |
 | User | Connect to a saved PBX server, edit and bulk edit configs, restore, resync with the profile's command, read the change log |
-| Viewer | Connect to a saved PBX server and look: open phones, preview a bulk edit, read history and the change log. Cannot change anything on the PBX or in the app |
+| Viewer | Connect to a saved PBX server and look: open phones, preview a bulk edit, read history and the change log. Cannot change anything on the PBX or in the app, and sees `********` in place of passwords and other secrets unless an administrator allows otherwise |
 
 Server profiles are an administrator's job because they hold commands the app runs on the
 PBX over SSH and decide which host receives the PBX password; a profile is, in effect, a
 shell on that machine.
+
+**Secrets and viewers.** By default a viewer never receives SIP passwords, admin
+passwords, PINs, SNMP community strings, keys, or the sign-in parts of provisioning URLs
+and rules: the server sends `********` in their place, in the editor, history, compare,
+templates and bulk-edit previews, and withholds anything that would let one be guessed
+(file hashes, a preview or search that tests a secret's value). An administrator switches
+this under **Settings > Privacy > Hide passwords and other secrets from viewers**; turn it
+off if your viewers need to read a phone's SIP password. Users and administrators always
+see the real values, and the change log, Find and the drift report hide secrets from
+everyone as before.
 
 Roles are enforced by the server on every request, not just hidden in the interface. An
 administrator sets a role when adding an account and can change it later from **Settings > Users**;
@@ -720,10 +730,14 @@ It can be filtered, narrowed to failures, and exported as CSV. It is kept in
 `audit-log.json` in the data directory, newest 5,000 entries (`AUDIT_KEEP`), and
 deliberately cannot be cleared from the app.
 
-Behind a reverse proxy every request arrives from the proxy; `X-Forwarded-For` is believed
-only when it comes from a proxy `TRUST_PROXY` names. The default (`loopback, uniquelocal`)
-covers a proxy on the same host or a private network; set `TRUST_PROXY=false` when the app
-is reached directly, or a hop count / address list for anything else.
+Behind a reverse proxy every request arrives from the proxy, and believing its
+`X-Forwarded-For` is your choice. Unset, only a proxy on the same host is believed, so
+behind a proxy elsewhere every client appears as the proxy: the sign-in throttle is shared
+and the log shows the proxy's address. Set `TRUST_PROXY` to the proxy's address (for
+example `TRUST_PROXY=192.168.1.20`) or to `1` when the proxy is the only way in, to record
+real clients. `TRUST_PROXY=uniquelocal` believes any private-network peer, which is
+convenient but lets a client that reaches the app directly on that network claim any
+address. The start-up log says which is in force.
 
 ### SSH host keys
 The app works like OpenSSH's `known_hosts`. The first time it connects to a PBX it
@@ -854,9 +868,10 @@ on the host at all:
      (`/app.js?v=1.0.0`), and a page left open across an upgrade offers to reload
    - **SSL tab**: request a certificate and turn on **Force SSL** and **HTTP/2**
 
-The proxy's `X-Forwarded-For` is trusted when it comes from a private address (the default
-`TRUST_PROXY`), so the sign-in throttle and the audit log see the real client. Lockout is
-tracked per account rather than per IP, so it works either way.
+Set `TRUST_PROXY` to the address of the machine running Nginx Proxy Manager (for example
+`TRUST_PROXY=192.168.1.20`) so the sign-in throttle and the audit log see the real client
+rather than the proxy; without it the app ignores the proxy's `X-Forwarded-For`. Lockout
+is tracked per account rather than per IP, so it works either way.
 
 #### When NPM is on a different host
 A shared Docker network is not available across machines, so the app has to listen on the

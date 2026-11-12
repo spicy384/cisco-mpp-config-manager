@@ -314,6 +314,8 @@
           </label>
         </div>
 
+        <p id="secrets-masked-note" class="bulk-hint" hidden>Passwords and other secrets are hidden for viewer accounts.</p>
+
         <div class="tabs" role="tablist">
           <button id="tab-quick" class="tab is-active" type="button" role="tab" aria-selected="true">Quick</button>
           <button id="tab-advanced" class="tab" type="button" role="tab" aria-selected="false">Advanced</button>
@@ -812,6 +814,19 @@
         <button id="sshkey-generate-btn" type="button" hidden>Create Key</button>
         <button id="sshkey-remove-btn" type="button" class="ghost-danger" hidden>Remove Key</button>
       </div>
+    </section>
+
+    <section class="panel admin-only" id="privacy-panel">
+      <div class="panel-head">
+        <h2>Privacy</h2>
+        <span id="privacy-badge" class="badge">Not loaded</span>
+      </div>
+      <p class="bulk-hint">
+        Viewer accounts can open phones and read history. With this on, they see ******** in
+        place of SIP passwords, admin passwords and other secrets; users and administrators
+        always see them.
+      </p>
+      <label class="check-inline"><input type="checkbox" id="privacy-mask-viewers" disabled /> Hide passwords and other secrets from viewers</label>
     </section>
 
     <section class="panel" id="version-panel" hidden>

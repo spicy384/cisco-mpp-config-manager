@@ -534,6 +534,10 @@ async function api(path, options = {}) {
     if (!readable) {
       throw new Error("The server sent a reply this page could not read. Reload the page and try again.");
     }
+    // Any reply that carries config values says when this account's view of them is masked.
+    if (data.secretsMasked === true) {
+      setSecretsMasked(true);
+    }
     return data;
   }
 
@@ -662,6 +666,11 @@ function addRow(entry = { key: "", value: "", attributes: {} }) {
   row.querySelector(".tag").value = entry.key || "";
   row.querySelector(".value").value = entry.value || "";
   row.querySelector(".attrs").value = JSON.stringify(entry.attributes || {});
+  if (entry.masked === true || (editorMasked && entry.value === MASKED_VALUE)) {
+    // The stars are what the server sent, not the setting.
+    row.classList.add("is-masked");
+    row.querySelector(".value").title = "Hidden for viewer accounts";
+  }
 
   row.querySelector(".remove-row").addEventListener("click", () => {
     toggleDeletedRow(row);
@@ -727,9 +736,45 @@ function readEntries() {
 function setBaseline(rootKey, entries) {
   baseline = {
     rootKey: rootKey || "flat-profile",
-    entries: deepClone(entries || [])
+    // Only what the editor itself holds for a row. Anything else the server adds to an
+    // entry (masked: true, for a viewer) would make an untouched phone look edited.
+    entries: deepClone(entries || []).map(({ key, value, attributes }) => ({ key, value, attributes }))
   };
 }
+
+// --- secrets hidden from viewers -------------------------------------------------------------
+//
+// An administrator can have the server withhold SIP passwords and other secrets from
+// viewer accounts. They then arrive as this literal, entry by entry, and the page shows
+// them as they come: the hiding is the server's doing, nothing here is a safeguard.
+const MASKED_VALUE = "********";
+
+// Whether this account's view is masked (the note in the editor says so).
+let secretsMasked = false;
+// Whether what is in the editor now was loaded with secrets masked. Its stars are not
+// the phone's passwords, so it must never be written anywhere.
+let editorMasked = false;
+
+function setSecretsMasked(masked) {
+  secretsMasked = Boolean(masked);
+  document.getElementById("secrets-masked-note").hidden = !secretsMasked;
+}
+
+/** Whether a reply that carries config values came with its secrets masked. */
+function repliedMasked(data) {
+  return data?.secretsMasked === true || (data?.entries || []).some((entry) => entry && entry.masked === true);
+}
+
+/**
+ * True when these values come from a masked load and still hold the mask. Viewers cannot
+ * write at all, but an account promoted while a masked phone is open could: saving it
+ * would put the stars where the passwords are.
+ */
+function carriesMaskedSecret(items) {
+  return editorMasked && (items || []).some((item) => item && item.value === MASKED_VALUE);
+}
+
+const MASKED_WRITE_MESSAGE = "This was loaded with its passwords and other secrets hidden (********), and writing it would put the stars in their place. Open the phone again and retry.";
 
 function loadEntriesIntoEditor(entries) {
   clearRows();
@@ -1419,6 +1464,14 @@ async function loadFile(name) {
   showAllFields = false;
   // The button form belongs to the phone it was opened on, never to the next one.
   resetQuickButtonForm();
+  editorMasked = repliedMasked(data);
+  if (editorMasked) {
+    setSecretsMasked(true);
+  } else if (secretsMasked) {
+    // Nothing masked in this one: an administrator may have switched the hiding off
+    // since the page loaded, so ask rather than leave the note standing.
+    refreshPrivacy().catch(() => {});
+  }
   loadEntriesIntoEditor(data.entries || []);
   setBaseline(data.rootKey || "flat-profile", data.entries || []);
   refreshQuickDirty();
@@ -1471,6 +1524,10 @@ async function saveCurrentFile() {
   }
 
   const entries = readEntries();
+  if (carriesMaskedSecret(entries)) {
+    setStatus(MASKED_WRITE_MESSAGE, true);
+    return;
+  }
   const rootKey = rootKeyInput.value.trim() || "flat-profile";
   // The loaded file is saved against the version it was loaded at, so a change made on
   // the PBX meanwhile is not overwritten. Under any other name the server refuses to
@@ -1539,6 +1596,8 @@ async function saveCurrentFile() {
     loadEntriesIntoEditor(entries);
   }
   setBaseline(rootKey, entries);
+  // What was written held no mask (or it would have been refused), so the editor does not either.
+  editorMasked = false;
   refreshQuickDirty();
   renderFileList(getFilteredFiles());
   setStatus(`Saved ${fileName}`);
@@ -1598,6 +1657,11 @@ async function createNewFile() {
     rootKey = "flat-profile";
   } else {
     const tpl = await getTemplateById(sourceId);
+    if (repliedMasked(tpl)) {
+      // The template came with its secrets hidden: a phone made from it would get the stars.
+      setStatus("This template was loaded with its passwords and other secrets hidden (********), so a phone cannot be created from it here.", true);
+      return;
+    }
     if (!confirm(`Create a new config using template "${dialogText(tpl.name)}"? This will replace the current editor fields.`)) {
       return;
     }
@@ -1659,6 +1723,10 @@ async function saveTemplate() {
   }
 
   const entries = readEntries();
+  if (carriesMaskedSecret(entries)) {
+    setStatus(MASKED_WRITE_MESSAGE, true);
+    return;
+  }
   const rootKey = rootKeyInput.value.trim() || "flat-profile";
 
   await api("/api/templates", {
@@ -1685,6 +1753,11 @@ async function loadTemplateIntoEditor() {
   const tpl = await getTemplateById(templateId);
   showAllFields = false;
   rootKeyInput.value = String(tpl.rootKey || "flat-profile");
+  // The editor now holds the template's values, hidden ones included.
+  editorMasked = repliedMasked(tpl);
+  if (editorMasked) {
+    setSecretsMasked(true);
+  }
   loadEntriesIntoEditor(deepClone(tpl.entries || []));
   setBaseline(rootKeyInput.value, readEntries());
   setStatus(`Loaded template: ${tpl.name}`);
@@ -2279,8 +2352,20 @@ const SNAPSHOT_REASON_LABEL = {
   replace: "before it was replaced"
 };
 
-// Mirrors the server's change-log redaction so a confirm dialog never shows a password.
-const SENSITIVE_TAG_RE = /passwd|password|passphrase|secret/i;
+// Mirrors the server's list of secret tags (SENSITIVE_TAG in server.js; keep the two in
+// step) so a confirm dialog or a results table never shows a password, PIN, community
+// string or key.
+const SENSITIVE_TAG_RE = new RegExp([
+  "passw(?:or)?d",
+  "pwd",
+  "passphrase",
+  "secret",
+  "credential",
+  "community",
+  "(?:^|[_-])pin(?:[_-]|$)",
+  "(?:^|[_-])token(?:[_-]|$)",
+  "(?:private|priv|privacy|auth|shared|wep|wpa|srtp|encryption|encrypt|cipher|api|master|session|symmetric|hmac|aes|acs|tr[-_]?069)[-_]?key"
+].join("|"), "i");
 
 function describeVersion(version) {
   const reason = SNAPSHOT_REASON_LABEL[version.reason] || version.reason;
@@ -2401,7 +2486,11 @@ async function compareVersion(fileName, version, row) {
     note.textContent = `${fileName} no longer exists on the PBX. Restoring this version would recreate it with ${(detail.entries || []).length} fields.`;
     historyDiffBody.appendChild(note);
   } else if (diff.length === 0) {
-    note.textContent = "No differences: the file on the PBX matches this version field for field.";
+    // With secrets masked, "field for field" cannot be vouched for: the hidden values
+    // all look alike from here.
+    note.textContent = detail.secretsMasked === true || secretsMasked
+      ? "No differences found. Passwords and other secrets are hidden for this account, so a change in one of those may not be shown."
+      : "No differences: the file on the PBX matches this version field for field.";
     historyDiffBody.appendChild(note);
   } else {
     const table = document.createElement("table");
@@ -2878,6 +2967,7 @@ function closeOpenPhone() {
   setEditorPending(null);
   currentFile = "";
   currentFileVersion = null;
+  editorMasked = false;
   fileNameInput.value = "";
   rootKeyInput.value = "flat-profile";
   historyBtn.hidden = true;
@@ -4115,6 +4205,7 @@ function showPage(name, panelId = null) {
     renderAccountPanel();
     if (currentUser.role === "admin") {
       refreshUsers().catch((error) => setStatus(error.message, true));
+      refreshPrivacy().catch((error) => setStatus(error.message, true));
     }
   }
 
@@ -4479,7 +4570,10 @@ function updateQuickPreview() {
       server: sipServerForQuick(),
       ...quickFieldValues
     });
-    quickPreviewEl.textContent = produced.map((p) => `${p.key} = ${p.value || "(empty)"}`).join("   |   ");
+    // The password field is masked; the line that spells out what will be written must not undo that.
+    quickPreviewEl.textContent = produced
+      .map((p) => `${p.key} = ${p.value ? (SENSITIVE_TAG_RE.test(p.key) ? "(hidden)" : p.value) : "(empty)"}`)
+      .join("   |   ");
     quickPreviewEl.classList.remove("is-error");
   } catch (error) {
     quickPreviewEl.textContent = error.message;
@@ -4561,6 +4655,11 @@ async function applyQuickChange(produced, description) {
   if (quickScope() === "bulk") {
     if (selectedFiles.size === 0) {
       setStatus("Tick some phones in the XML Files list first.", true);
+      return;
+    }
+    // A Quick field pre-filled from a masked phone holds the stars, not the secret.
+    if (carriesMaskedSecret(produced)) {
+      setStatus("That value is hidden here (********), so it cannot be copied to other phones. Type the value to set.", true);
       return;
     }
 
@@ -5061,6 +5160,44 @@ document.getElementById("version-check-enabled").addEventListener("change", asyn
       box.checked = !box.checked;
       box.disabled = false;
     }
+  }
+});
+
+// --- privacy: hiding secrets from viewers ---------------------------------------------
+//
+// One switch, an administrator's: whether viewer accounts get ******** in place of SIP
+// passwords and other secrets. The server does the hiding; this is only where it is set,
+// and where everyone learns whether their own view is masked.
+
+const privacyMaskBox = document.getElementById("privacy-mask-viewers");
+
+function renderPrivacy(data) {
+  const on = Boolean(data.maskSecretsForViewers);
+  privacyMaskBox.checked = on;
+  privacyMaskBox.disabled = false;
+  document.getElementById("privacy-badge").textContent = on ? "secrets hidden from viewers" : "viewers see secrets";
+  setSecretsMasked(data.masked === true);
+}
+
+/** Reads the setting, and with it whether this account's own view is masked. */
+async function refreshPrivacy() {
+  renderPrivacy(await api("/api/settings/privacy"));
+}
+
+privacyMaskBox.addEventListener("change", async () => {
+  const wanted = privacyMaskBox.checked;
+  privacyMaskBox.disabled = true;
+  try {
+    const data = await api("/api/settings/privacy", { method: "PUT", body: JSON.stringify({ maskSecretsForViewers: wanted }) });
+    renderPrivacy(data);
+    setStatus(data.maskSecretsForViewers
+      ? "Viewers now see ******** in place of passwords and other secrets."
+      : "Viewers can now see passwords and other secrets.");
+  } catch (error) {
+    // Not saved: the box goes back to what the server still has.
+    privacyMaskBox.checked = !wanted;
+    privacyMaskBox.disabled = false;
+    setStatus(error.message, true);
   }
 });
 
@@ -5697,6 +5834,9 @@ document.getElementById("add-user-btn").addEventListener("click", async () => {
 async function onSignedIn() {
   hideAuthOverlay();
   renderAccountPanel();
+  // Whether this account's view of secrets is masked (and, for an administrator, the
+  // setting itself). Nothing else waits for it.
+  refreshPrivacy().catch(() => {});
 
   try {
     await refreshServers();

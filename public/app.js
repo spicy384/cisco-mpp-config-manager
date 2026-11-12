@@ -233,6 +233,46 @@ function deepClone(obj) {
   return JSON.parse(JSON.stringify(obj));
 }
 
+/**
+ * A value that came from a file, a list or the server, made fit for a confirm dialog:
+ * one line, no control characters, and short enough that it cannot push the rest of
+ * the question out of sight.
+ */
+function dialogText(value, max = 80) {
+  const text = String(value ?? "").replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ").trim();
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
+/** Small preferences kept in the browser. Storage can be switched off; nothing depends on it. */
+function readStored(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Remembering it is a nicety only.
+  }
+}
+
+/** Hands a generated file to the browser's download. */
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Not at once: some browsers have not started reading the blob yet.
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
 function setStatus(message, isError = false) {
   statusEl.textContent = message;
   statusEl.classList.toggle("is-error", isError);
@@ -302,7 +342,7 @@ function applyTheme(theme) {
     label.textContent = currentTheme === "dark" ? "Light Theme" : "Dark Theme";
   }
 
-  localStorage.setItem("pbx-theme", currentTheme);
+  writeStored("pbx-theme", currentTheme);
 }
 
 /**
@@ -349,6 +389,26 @@ function hideHostKeyWarning() {
 let csrfToken = null;
 let currentUser = null;
 
+// Each counts something a slow reply can outlive, so a late answer is known to be late.
+let identityEpoch = 0;   // sign-ins
+let workspaceEpoch = 0;  // which PBX the list, the selections and the open phone belong to
+let editorEpoch = 0;     // which phone (or none) the editor holds
+// Who was signed in when the session ran out: somebody else signing in gets a fresh page.
+let expiredUserId = null;
+
+// A 401 from these means "those credentials were wrong", not "your session expired".
+const SIGN_IN_PATHS = new Set([
+  "/api/auth/setup",
+  "/api/auth/login",
+  "/api/auth/login/mfa",
+  "/api/auth/login/recovery",
+  "/api/auth/passkeys/login/options",
+  "/api/auth/passkeys/login/verify"
+]);
+
+// Requests that act on the PBX this page is showing (not the one that changes which it is).
+const WORKSPACE_PATH_RE = /^\/api\/(?:(?:files|bulk-edit|provision|search|drift|resync)(?:\/|$)|connection$)/;
+
 // The version this page was served by; the server names the version it runs on every API reply.
 const PAGE_VERSION = document.querySelector('meta[name="app-version"]')?.content || null;
 
@@ -378,43 +438,148 @@ function noticeVersion(res) {
   document.body.prepend(bar);
 }
 
+/**
+ * This page shows one PBX while the session has been moved to another (in another tab
+ * or window). Nothing is retried: the notice stays, with a reload, until that is settled.
+ */
+function showPbxChangedBar(message) {
+  let bar = document.getElementById("pbx-changed-bar");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "pbx-changed-bar";
+    bar.className = "update-bar pbx-changed-bar";
+    bar.setAttribute("role", "alert");
+
+    const text = document.createElement("span");
+    text.className = "pbx-changed-text";
+
+    const reload = document.createElement("button");
+    reload.type = "button";
+    reload.className = "small";
+    reload.textContent = "Reload";
+    reload.addEventListener("click", () => location.reload());
+
+    bar.append(text, reload);
+    document.body.prepend(bar);
+  }
+  bar.querySelector(".pbx-changed-text").textContent = message;
+}
+
+function hidePbxChangedBar() {
+  document.getElementById("pbx-changed-bar")?.remove();
+}
+
+/**
+ * The session's CSRF token was replaced (this account signed in again in another tab).
+ * Reads the current one. False when there is no session to carry on with, or when it
+ * now belongs to somebody else - then the page starts again rather than act as them.
+ */
+async function renewCsrfToken() {
+  const before = currentUser;
+  let signedIn = false;
+  try {
+    signedIn = await refreshIdentity();
+  } catch {
+    return false;
+  }
+  if (!signedIn) {
+    return false;
+  }
+  if (before && currentUser && currentUser.id !== before.id) {
+    location.reload();
+    return false;
+  }
+  return true;
+}
+
 async function api(path, options = {}) {
-  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  const { csrfRetried = false, ...fetchOptions } = options;
+  const method = String(fetchOptions.method || "GET").toUpperCase();
+  const headers = { "Content-Type": "application/json", ...(fetchOptions.headers || {}) };
   if (csrfToken) {
     headers["X-CSRF-Token"] = csrfToken;
   }
 
-  const res = await fetch(path, { ...options, headers });
+  // A change names the PBX it is meant for, so the server can refuse it when this
+  // session has since been moved to another one.
+  if (method !== "GET" && WORKSPACE_PATH_RE.test(path)) {
+    if (!lastConnectionInfo || !serverPbxKey) {
+      throw new Error("Not connected to a PBX. Connect first.");
+    }
+    // A header can only carry plain ASCII; a key with anything else in it (a directory
+    // name, say) goes URI-encoded, which the server reads as the same key.
+    headers["X-Pbx-Key"] = /^[\x20-\x7e]+$/.test(serverPbxKey) ? serverPbxKey : encodeURIComponent(serverPbxKey);
+  }
+
+  const sentIdentity = identityEpoch;
+  const sentWorkspace = workspaceEpoch;
+
+  // no-store: replies carry SIP passwords and logs, which do not belong in the disk cache.
+  const res = await fetch(path, { cache: "no-store", ...fetchOptions, headers });
   noticeVersion(res);
-  const data = await res.json().catch(() => ({}));
 
-  if (!res.ok) {
-    // A 401 from the sign-in endpoints means "those credentials were wrong", not
-    // "your session expired" - only the latter should bounce back to the login screen.
-    const isAuthAttempt = path.startsWith("/api/auth/");
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+  const readable = data !== null && typeof data === "object";
+  if (!readable) {
+    data = {};
+  }
 
-    if (!isAuthAttempt && (res.status === 401 || (res.status === 409 && data.setupRequired))) {
+  if (res.ok) {
+    // A page from a proxy, or half a reply: "it worked" with nothing in it is not success.
+    if (!readable) {
+      throw new Error("The server sent a reply this page could not read. Reload the page and try again.");
+    }
+    return data;
+  }
+
+  // Only the sign-in steps answer 401 for "those credentials were wrong"; anywhere else
+  // it means the session is over.
+  if (!SIGN_IN_PATHS.has(path) && (res.status === 401 || (res.status === 409 && data.setupRequired))) {
+    // A reply to a request sent before the latest sign-in says nothing about the new session.
+    if (sentIdentity === identityEpoch && (currentUser || authOverlay.hidden)) {
+      if (currentUser) {
+        expiredUserId = currentUser.id;
+      }
       csrfToken = null;
       currentUser = null;
       showAuthOverlay(data.setupRequired ? "setup" : "login");
-      throw new Error(data.setupRequired ? "Setup required." : "Your session has expired. Sign in again.");
     }
-
-    // The PBX connection ended on its own: drop back to the connect form, whichever
-    // action happened to discover it.
-    if (data.connectionLost) {
-      data.error = handleConnectionLost(data);
-    }
-
-    // Callers that need more than the message (e.g. the host-key mismatch details)
-    // can read the full response from the error.
-    const error = new Error(data.error || `Request failed (${res.status})`);
-    error.status = res.status;
-    error.data = data;
-    throw error;
+    const expired = new Error(data.setupRequired ? "Setup required." : "Your session has expired. Sign in again.");
+    expired.status = res.status;
+    expired.data = data;
+    throw expired;
   }
 
-  return data;
+  // The token went stale while the session lives on: fetch the current one and try once more.
+  if (res.status === 403 && !csrfRetried && sentIdentity === identityEpoch && /CSRF token/i.test(String(data.error || ""))) {
+    if (await renewCsrfToken()) {
+      return api(path, { ...fetchOptions, csrfRetried: true });
+    }
+  }
+
+  // The session works on another PBX than this page shows. Say so and stop.
+  if (res.status === 409 && data.pbxChanged) {
+    showPbxChangedBar(data.error || "This session is now working on a different PBX than this page shows. Reload to continue.");
+  }
+
+  // The PBX connection ended on its own: drop back to the connect form, whichever
+  // action happened to discover it. A reply to a request sent before the latest connect
+  // says nothing about the new connection.
+  if (data.connectionLost && sentWorkspace === workspaceEpoch) {
+    data.error = handleConnectionLost(data);
+  }
+
+  // Callers that need more than the message (e.g. the host-key mismatch details)
+  // can read the full response from the error.
+  const error = new Error(data.error || `Request failed (${res.status})`);
+  error.status = res.status;
+  error.data = data;
+  throw error;
 }
 
 function updateShowAllButtons() {
@@ -519,6 +684,20 @@ function addRow(entry = { key: "", value: "", attributes: {} }) {
 
 function clearRows() {
   entriesBody.innerHTML = "";
+}
+
+// "load" or "save" while one is on its way to or from the PBX. Saving and opening another
+// phone wait for it, so a slow reply never lands in an editor that has moved on.
+let editorPending = null;
+
+function setEditorPending(kind) {
+  editorPending = kind || null;
+  const busy = Boolean(editorPending);
+  for (const btn of [saveBtn, saveTopBtn, saveQuickBtn, createBtn, createTopBtn]) {
+    btn.disabled = busy;
+  }
+  fileListEl.classList.toggle("is-busy", busy);
+  fileListEl.setAttribute("aria-busy", String(busy));
 }
 
 function readEntries() {
@@ -634,6 +813,10 @@ function renderFileList(files) {
     }
 
     details.addEventListener("click", () => {
+      // A save or another load is still on its way; the list is dimmed until it lands.
+      if (editorPending) {
+        return;
+      }
       if (!confirmDiscardEdits(file.name === currentFile ? "reload this phone" : "open another phone")) {
         return;
       }
@@ -754,10 +937,18 @@ function syncAuthControls() {
   quickPasswordInput.hidden = serverUsesKey(quickServerSelect.value);
 }
 
+// The newest list request wins; an older reply, or one for a PBX since left, is dropped.
+let filesRequestSeq = 0;
+
 async function refreshFiles() {
+  const seq = ++filesRequestSeq;
+  const forWorkspace = workspaceEpoch;
   setFilesLoading(true);
   try {
     const data = await api("/api/files");
+    if (seq !== filesRequestSeq || forWorkspace !== workspaceEpoch) {
+      return;
+    }
     allFiles = data.files || [];
     populateDriftBaselines();
     populateProvisionSources();
@@ -774,7 +965,9 @@ async function refreshFiles() {
     onSelectionChanged();
     renderPhoneReport();
   } finally {
-    setFilesLoading(false);
+    if (seq === filesRequestSeq) {
+      setFilesLoading(false);
+    }
   }
 
   // Registration status rides along with the list; a failure must not break the list.
@@ -815,7 +1008,13 @@ async function refreshRegistrations(force = false) {
     return;
   }
 
-  registrations = await api(`/api/registrations${force ? "?refresh=1" : ""}`);
+  const forWorkspace = workspaceEpoch;
+  const fetched = await api(`/api/registrations${force ? "?refresh=1" : ""}`);
+  if (forWorkspace !== workspaceEpoch || !lastConnectionInfo) {
+    // Answered for a PBX this page has since left.
+    return;
+  }
+  registrations = fetched;
   const { withExtension, online } = registrations.summary || { withExtension: 0, online: 0 };
 
   regCountEl.hidden = false;
@@ -843,11 +1042,22 @@ setInterval(() => {
   if (lastConnectionInfo) {
     refreshRegistrations().catch(() => {});
   }
+  const forWorkspace = workspaceEpoch;
   api("/api/status").then((data) => {
+    // A connect, switch or disconnect made here meanwhile has its own answer coming.
+    if (forWorkspace !== workspaceEpoch || connectionChanging > 0) {
+      return;
+    }
     applyConnections(data.connections);
     if (lastConnectionInfo && !data.connected) {
       // Closed by someone else, or its profile was deleted: same as a dropped line.
       handleConnectionLost({ error: data.lostMessage || "The connection to the PBX was closed. Reconnect to continue.", lastDisconnect: data.lastDisconnect });
+    } else if (lastConnectionInfo && data.connected && !isSamePbx(data.connection, lastConnectionInfo)) {
+      // Another tab or window of this session switched PBX; every request now goes there.
+      handlePbxMoved(data.connection);
+    } else if (lastConnectionInfo && data.connected) {
+      // Page and session agree (again): a standing notice that they did not is over.
+      hidePbxChangedBar();
     }
   }).catch(() => {});
 }, REGISTRATION_POLL_MS);
@@ -988,12 +1198,7 @@ function renderPhoneReport() {
 
 // The table shows this many phones and scrolls for the rest, unless expanded.
 const PHONES_SHOWN = 15;
-let phonesExpanded = false;
-try {
-  phonesExpanded = localStorage.getItem("pbx-phones-expanded") === "1";
-} catch {
-  phonesExpanded = false;
-}
+let phonesExpanded = readStored("pbx-phones-expanded") === "1";
 
 /** Limits the table to PHONES_SHOWN rows of height, with a button to show them all. */
 function capPhoneReport(count) {
@@ -1002,6 +1207,12 @@ function capPhoneReport(count) {
   phonesExpandBtn.textContent = phonesExpanded ? `Show ${PHONES_SHOWN} at a time` : `Show all ${count}`;
 
   if (!needsCap || phonesExpanded) {
+    phonesResultsEl.style.maxHeight = "";
+    phonesResultsEl.classList.remove("is-capped");
+    return;
+  }
+  // Nothing can be measured while the Reporting page is hidden; showing it renders again.
+  if (phonesResultsEl.getClientRects().length === 0) {
     phonesResultsEl.style.maxHeight = "";
     phonesResultsEl.classList.remove("is-capped");
     return;
@@ -1016,11 +1227,7 @@ function capPhoneReport(count) {
 
 phonesExpandBtn.addEventListener("click", () => {
   phonesExpanded = !phonesExpanded;
-  try {
-    localStorage.setItem("pbx-phones-expanded", phonesExpanded ? "1" : "0");
-  } catch {
-    // Remembering it is a nicety only.
-  }
+  writeStored("pbx-phones-expanded", phonesExpanded ? "1" : "0");
   renderPhoneReport();
 });
 
@@ -1042,24 +1249,12 @@ function exportPhonesCsv() {
     setStatus("Nothing to export.", true);
     return;
   }
-  const cell = (v) => {
-    const s = String(v ?? "");
-    const safe = /^[=+\-@]/.test(s) ? `'${s}` : s;
-    return `"${safe.replace(/"/g, '""')}"`;
-  };
-  const lines = [["Phone", "MAC address", "File", "Extension", "Model", "Status", "Address", "RTT ms", "Size bytes", "Last change"].map(cell).join(",")];
+  const lines = [CsvRows.csvLine(["Phone", "MAC address", "File", "Extension", "Model", "Status", "Address", "RTT ms", "Size bytes", "Last change"])];
   for (const row of rows) {
-    lines.push([row.station, row.mac, row.name, row.extension, row.model, row.statusLabel, row.address, row.rtt ?? "", row.size, row.lastChange ? formatTimestamp(row.lastChange) : ""].map(cell).join(","));
+    lines.push(CsvRows.csvLine([row.station, row.mac, row.name, row.extension, row.model, row.statusLabel, row.address, row.rtt ?? "", row.size, row.lastChange ? formatTimestamp(row.lastChange) : ""]));
   }
   const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `pbx-phones-${(lastConnectionInfo?.profileName || lastConnectionInfo?.host || "pbx").replace(/[^\w.-]+/g, "_")}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, `pbx-phones-${(lastConnectionInfo?.profileName || lastConnectionInfo?.host || "pbx").replace(/[^\w.-]+/g, "_")}.csv`);
   setStatus(`Exported ${rows.length} phone${rows.length === 1 ? "" : "s"}.`);
 }
 
@@ -1085,7 +1280,7 @@ function applyConnections(list) {
     return;
   }
   liveConnections = list;
-  const currentKey = connectionKeyOf(lastConnectionInfo);
+  const currentKey = serverKeyOf(lastConnectionInfo);
 
   // In the bar while connected: a select, only when there is somewhere else to go.
   pbxSwitchSelect.replaceChildren();
@@ -1121,7 +1316,7 @@ function applyConnections(list) {
 
 /** Moves this browser onto a PBX someone has connected. The editor is swapped like on a connect. */
 async function switchToPbx(key) {
-  if (key === connectionKeyOf(lastConnectionInfo)) {
+  if (key === serverKeyOf(lastConnectionInfo)) {
     return;
   }
   if (!confirmDiscardEdits("switch to another PBX")) {
@@ -1129,20 +1324,59 @@ async function switchToPbx(key) {
     return;
   }
 
-  const data = await api("/api/connection/select", { method: "POST", body: JSON.stringify({ key }) });
-  clearWorkspace();
-  workspaceKey = connectionKeyOf(data.connection);
-  lastConnectionInfo = data.connection || null;
-  setConnectionCollapsed(true, data.connection || null);
-  setPhoneModelChoice(null, null);
-  if (data.connection?.profileId) {
-    serverSelect.value = data.connection.profileId;
-    fillFormFromServer(data.connection.profileId);
+  let data;
+  connectionChanging += 1;
+  try {
+    data = await api("/api/connection/select", { method: "POST", body: JSON.stringify({ key }) });
+  } finally {
+    connectionChanging -= 1;
   }
+  enterPbx(data.connection);
   applyConnections(data.connections);
   setStatus(data.message || "Switched PBX");
   await refreshFiles();
   await refreshLogScopes();
+}
+
+// More than zero while this page is itself connecting, switching or disconnecting.
+let connectionChanging = 0;
+
+/** Starts afresh on a PBX: nothing of the previous one's list, selections or open phone is kept. */
+function enterPbx(connection) {
+  clearWorkspace();
+  workspaceKey = connectionKeyOf(connection);
+  serverPbxKey = serverKeyOf(connection);
+  lastConnectionInfo = connection || null;
+  hidePbxChangedBar();
+  setConnectionCollapsed(true, connection || null);
+  setPhoneModelChoice(null, null);
+  if (connection?.profileId) {
+    serverSelect.value = connection.profileId;
+    fillFormFromServer(connection.profileId);
+  }
+}
+
+/**
+ * The session is on another PBX than this page shows (it was switched in another tab
+ * or window, or signed in again), so the server now sends every request from this page
+ * there. The page follows - unless it holds unsaved edits, which are left alone under
+ * a standing notice (the server refuses to write them to the other PBX).
+ */
+function handlePbxMoved(connection) {
+  const name = connection.profileName || connection.host || "another PBX";
+  if (editorIsDirty()) {
+    showPbxChangedBar(
+      `This session is now working on ${name}, not the PBX shown here (it was switched in another tab or window). `
+        + `Your unsaved edits are still here but cannot be saved to ${name}. Reload to work on ${name}.`
+    );
+    return;
+  }
+
+  enterPbx(connection);
+  setStatus(`This session is now working on ${name} (it was switched in another tab or window). The list shows ${name}.`, true);
+  refreshFiles()
+    .then(() => refreshLogScopes())
+    .catch((error) => setStatus(error.message, true));
 }
 
 pbxSwitchSelect.addEventListener("change", () => {
@@ -1152,8 +1386,29 @@ pbxSwitchSelect.addEventListener("change", () => {
   });
 });
 
+/**
+ * Opens a phone in the editor. The newest request wins: a reply that arrives after
+ * another phone was asked for, or after the phone or the PBX was closed, is dropped.
+ * Resolves false when that happened.
+ */
 async function loadFile(name) {
-  const data = await api(`/api/files/${encodeURIComponent(name)}`);
+  if (editorPending === "save") {
+    throw new Error("A save is still on its way to the PBX. Try again when it has finished.");
+  }
+
+  const epoch = ++editorEpoch;
+  setEditorPending("load");
+  let data;
+  try {
+    data = await api(`/api/files/${encodeURIComponent(name)}`);
+  } finally {
+    if (epoch === editorEpoch) {
+      setEditorPending(null);
+    }
+  }
+  if (epoch !== editorEpoch) {
+    return false;
+  }
 
   currentFile = data.fileName;
   currentFileVersion = data.version || null;
@@ -1162,6 +1417,8 @@ async function loadFile(name) {
   rootKeyInput.value = data.rootKey || "flat-profile";
 
   showAllFields = false;
+  // The button form belongs to the phone it was opened on, never to the next one.
+  resetQuickButtonForm();
   loadEntriesIntoEditor(data.entries || []);
   setBaseline(data.rootKey || "flat-profile", data.entries || []);
   refreshQuickDirty();
@@ -1186,7 +1443,10 @@ async function loadFile(name) {
     await refreshHistory();
   }
 
-  setStatus(`Loaded ${data.fileName}`);
+  if (epoch === editorEpoch) {
+    setStatus(`Loaded ${data.fileName}`);
+  }
+  return true;
 }
 
 function resetEditorToBaseline() {
@@ -1203,37 +1463,120 @@ async function saveCurrentFile() {
     return;
   }
 
+  if (editorPending) {
+    setStatus(editorPending === "save"
+      ? "A save is already on its way to the PBX."
+      : "The phone is still loading. Try again when it has opened.", true);
+    return;
+  }
+
   const entries = readEntries();
   const rootKey = rootKeyInput.value.trim() || "flat-profile";
-  // Only guard the file that was actually loaded; saving under a new name is a create.
-  const expectedVersion = fileName === currentFile ? currentFileVersion : null;
+  // The loaded file is saved against the version it was loaded at, so a change made on
+  // the PBX meanwhile is not overwritten. Under any other name the server refuses to
+  // replace an existing file until that has been confirmed (see sendGuardedSave).
+  const isLoadedFile = Boolean(currentFile) && fileName === currentFile;
+  const body = { rootKey, entries };
+  if (isLoadedFile) {
+    body.expectedVersion = currentFileVersion;
+  }
 
-  let result;
+  const epoch = editorEpoch;
+  let result = null;
+  let failure = null;
+  setEditorPending("save");
   try {
-    result = await api(`/api/files/${encodeURIComponent(fileName)}`, {
-      method: "POST",
-      body: JSON.stringify({ rootKey, entries, expectedVersion })
-    });
+    result = await sendGuardedSave(`/api/files/${encodeURIComponent(fileName)}`, body, fileName, () => epoch === editorEpoch);
   } catch (error) {
-    if (error.data?.conflict) {
-      setStatus(error.message, true);
-      if (confirm(`${error.message}\n\nReload ${fileName} now? The edits in the editor will be discarded.`)) {
+    failure = error;
+  } finally {
+    if (epoch === editorEpoch) {
+      setEditorPending(null);
+    }
+  }
+
+  if (failure) {
+    if (failure.data?.conflict) {
+      setStatus(failure.message, true);
+      if (epoch === editorEpoch
+        && confirm(`${dialogText(failure.message, 400)}\n\nReload ${dialogText(fileName)} now? The edits in the editor will be discarded.`)) {
         await loadFile(fileName);
       }
       return;
     }
-    throw error;
+    throw failure;
+  }
+  if (!result) {
+    setStatus("Nothing was saved.");
+    return;
   }
 
-  currentFile = fileName;
+  refreshFiles().catch(() => {});
+  refreshLogScopes().catch(() => {});
+
+  // The editor moved on while the save was on its way (another PBX, the phone closed):
+  // the file is saved, and what is in the editor now is not it.
+  if (epoch !== editorEpoch) {
+    setStatus(`Saved ${fileName}`);
+    return;
+  }
+
+  if (!isLoadedFile) {
+    // A new name: open it like any other phone, so its version, model and buttons are its own.
+    await reopenAfterWrite(fileName, "Saved");
+    return;
+  }
+
   currentFileVersion = result.version || null;
-  loadEntriesIntoEditor(entries);
+  // Rows are tidied to what was written, unless more was typed while the save was under way.
+  let untouched = false;
+  try {
+    untouched = JSON.stringify(readEntries()) === JSON.stringify(entries);
+  } catch {
+    untouched = false;
+  }
+  if (untouched) {
+    loadEntriesIntoEditor(entries);
+  }
   setBaseline(rootKey, entries);
   refreshQuickDirty();
   renderFileList(getFilteredFiles());
-  refreshFiles().catch(() => {});
-  refreshLogScopes().catch(() => {});
   setStatus(`Saved ${fileName}`);
+}
+
+/**
+ * Sends a save. The server refuses two things until they are confirmed: replacing a
+ * file that was not the one loaded ({ exists: true }) and writing a config with no
+ * fields at all ({ empty: true }). Each is asked about once and sent again on a yes.
+ * Resolves null when the answer was no, or when the editor moved on in the meantime.
+ */
+async function sendGuardedSave(path, body, fileName, stillCurrent) {
+  const request = { ...body };
+  for (;;) {
+    try {
+      return await api(path, { method: "POST", body: JSON.stringify(request) });
+    } catch (error) {
+      const askOverwrite = error.status === 409 && error.data?.exists && !request.overwrite;
+      const askEmpty = error.status === 400 && error.data?.empty && !request.allowEmpty;
+      if (!askOverwrite && !askEmpty) {
+        throw error;
+      }
+      if (!stillCurrent()) {
+        return null;
+      }
+      if (askOverwrite) {
+        if (!confirm(`${dialogText(fileName)} already exists on the PBX. Overwrite it?`)) {
+          return null;
+        }
+        request.overwrite = true;
+      } else {
+        if (!confirm(`Save ${dialogText(fileName)} with no fields at all?\n\nThe phone would be left with an empty configuration.`)) {
+          return null;
+        }
+        request.allowEmpty = true;
+      }
+    }
+  }
 }
 
 async function createNewFile() {
@@ -1255,27 +1598,57 @@ async function createNewFile() {
     rootKey = "flat-profile";
   } else {
     const tpl = await getTemplateById(sourceId);
-    if (!confirm(`Create a new config using template "${tpl.name}"? This will replace the current editor fields.`)) {
+    if (!confirm(`Create a new config using template "${dialogText(tpl.name)}"? This will replace the current editor fields.`)) {
       return;
     }
     entries = deepClone(tpl.entries || []);
     rootKey = String(tpl.rootKey || "flat-profile");
   }
 
-  await api("/api/files", {
-    method: "POST",
-    body: JSON.stringify({ fileName, rootKey, entries })
-  });
+  if (editorPending) {
+    setStatus("Wait for the save or load under way to finish first.", true);
+    return;
+  }
 
-  currentFile = fileName;
-  showAllFields = false;
-  rootKeyInput.value = rootKey;
-  loadEntriesIntoEditor(entries);
-  setBaseline(rootKey, entries);
-  renderFileList(getFilteredFiles());
+  const body = { fileName, rootKey, entries };
+  if (sourceId === "blank") {
+    // A blank config was just asked for and confirmed; no need to ask again.
+    body.allowEmpty = true;
+  }
+
+  const epoch = editorEpoch;
+  let result = null;
+  setEditorPending("save");
+  try {
+    result = await sendGuardedSave("/api/files", body, fileName, () => epoch === editorEpoch);
+  } finally {
+    if (epoch === editorEpoch) {
+      setEditorPending(null);
+    }
+  }
+  if (!result) {
+    setStatus("Nothing was created.");
+    return;
+  }
+
   refreshFiles().catch(() => {});
   refreshLogScopes().catch(() => {});
-  setStatus(`Created ${fileName}`);
+  if (epoch !== editorEpoch) {
+    setStatus(`Created ${fileName}`);
+    return;
+  }
+  // Opened like any other phone, so the next save is checked against the right version.
+  await reopenAfterWrite(fileName, "Created");
+}
+
+/** After writing a file under a name the editor did not hold: open it, and say what happened. */
+async function reopenAfterWrite(fileName, verb) {
+  try {
+    await loadFile(fileName);
+    setStatus(`${verb} ${fileName}`);
+  } catch (error) {
+    setStatus(`${verb} ${fileName}, but it could not be opened again: ${error.message}`, true);
+  }
 }
 
 async function saveTemplate() {
@@ -1360,6 +1733,15 @@ async function deleteSelectedServer() {
     return;
   }
 
+  const name = servers.find((s) => s.id === id)?.name || serverNameInput.value.trim() || "this server";
+  if (!confirm(
+    `Delete the saved server "${dialogText(name)}"?\n\n`
+      + "Anyone connected through it is disconnected. Its change log and version history are kept."
+  )) {
+    setStatus("Nothing was deleted.");
+    return;
+  }
+
   await api(`/api/servers/${encodeURIComponent(id)}`, { method: "DELETE" });
   await refreshServers();
   serverNameInput.value = "";
@@ -1379,8 +1761,13 @@ function onSelectionChanged() {
   invalidatePreview();
 }
 
+// Counts changes to the edit or the selection, so a preview that was still running when
+// one happened is not taken for a preview of what is on screen now.
+let previewEpoch = 0;
+
 // Any change to the edit or the file set makes an existing preview untrustworthy.
 function invalidatePreview() {
+  previewEpoch += 1;
   if (!previewedEdit) {
     return;
   }
@@ -1502,9 +1889,12 @@ function renderBulkResults(data) {
         afterTd.textContent = item.changes.map((c) => `${c.tag}: ${shown(c.tag, c.after, "(empty)")}`).join("\n");
       }
     } else {
-      beforeTd.textContent = (item.previousValues || []).join(", ");
+      // One tag: its name comes with the row, or with the job. A rollback's "new value"
+      // is a summary, not a setting, so there is nothing in it to hide.
+      const tag = isRollback ? "" : (item.changes?.[0]?.tag || data.key || "");
+      beforeTd.textContent = (item.previousValues || []).map((value) => shown(tag, value, "")).join(", ");
       if (item.status === "changed") {
-        afterTd.textContent = data.mode === "delete" ? "(tag removed)" : String(item.newValue ?? "");
+        afterTd.textContent = data.mode === "delete" ? "(tag removed)" : shown(tag, String(item.newValue ?? ""), "");
       }
     }
     tr.appendChild(beforeTd);
@@ -1604,9 +1994,24 @@ async function pollJobWithProgress(jobId, verb) {
   }
 }
 
+/** The edit or the selection changed while its preview ran: what came back describes neither. */
+function discardOutdatedPreview() {
+  previewedEdit = null;
+  bulkApplyBtn.disabled = true;
+  bulkResultsEl.replaceChildren();
+  setStatus("The edit or the selection changed while the preview was running. Preview again.", true);
+}
+
 async function previewBulkEdit() {
   const request = readBulkEditRequest();
+  // Whatever was previewed before no longer backs the Apply button.
+  invalidatePreview();
+  const epoch = previewEpoch;
   const job = await runBulkJobWithProgress(request, { dryRun: true, verb: "Previewing" });
+  if (epoch !== previewEpoch) {
+    discardOutdatedPreview();
+    return;
+  }
 
   renderBulkResults(job);
 
@@ -1633,28 +2038,35 @@ async function applyBulkEdit() {
 
   // A Quick action sends several tags at once, so describe them all.
   const action = request.edits
-    ? `${request.description || "apply this change"} (${request.edits.map((e) => e.key).join(", ")})`
+    ? `${dialogText(request.description || "apply this change")} (${dialogText(request.edits.map((e) => e.key).join(", "), 200)})`
     : (request.mode === "delete"
-      ? `delete tag "${request.key}"`
-      : `set "${request.key}" to "${request.value}"`);
+      ? `delete tag "${dialogText(request.key)}"`
+      : `set "${dialogText(request.key)}" to "${SENSITIVE_TAG_RE.test(request.key) ? "(hidden)" : dialogText(request.value)}"`);
 
   if (!confirm(`Write to the PBX now?\n\nThis will ${action} across ${fileCount} selected file${fileCount === 1 ? "" : "s"}.\n\nA copy of each file is kept first, so the batch can be rolled back afterwards.${unsavedEditsWarning(request.fileNames.includes(currentFile))}`)) {
     setStatus("Bulk edit cancelled.");
     return;
   }
 
+  const forWorkspace = workspaceEpoch;
   const job = await runBulkJobWithProgress(
     { ...request, resync: bulkResyncInput.checked },
     { dryRun: false, verb: "Applying to" }
   );
 
+  const changed = job.summary?.changed || 0;
+  const errors = job.summary?.error || 0;
+  if (forWorkspace !== workspaceEpoch) {
+    // The page moved to another PBX while the job ran: report it, but its results and
+    // its rollback belong to the PBX that was left.
+    setStatus(`The bulk edit finished on the previous PBX: ${changed} file${changed === 1 ? "" : "s"} changed${errors ? `, ${errors} failed` : ""}. Its details are in that server's Change Log.`, errors > 0);
+    return;
+  }
+
   renderBulkResults(job);
   offerBatchRollback(job);
   previewedEdit = null;
   bulkApplyBtn.disabled = true;
-
-  const changed = job.summary?.changed || 0;
-  const errors = job.summary?.error || 0;
   const resyncNote = job.resync ? `. ${summarizeResync(job.results)}` : "";
   const resyncFailed = job.resync && (job.results || []).some((item) => item.resync?.status === "failed");
   setStatus(
@@ -1695,7 +2107,12 @@ function formatTimestamp(ts) {
 }
 
 async function refreshLogScopes() {
+  const forWorkspace = workspaceEpoch;
   const data = await api("/api/logs");
+  if (forWorkspace !== workspaceEpoch) {
+    // Answered for a PBX this page has since left; whatever moved it asks again.
+    return;
+  }
   logScopes = data.scopes || [];
   connectedScopeKey = data.currentScopeKey || null;
 
@@ -1727,7 +2144,12 @@ async function refreshLogScopes() {
   await loadLogEntries();
 }
 
+// The newest log request wins, so picking servers quickly never shows one server's log
+// under another's name.
+let logRequestSeq = 0;
+
 async function loadLogEntries() {
+  const seq = ++logRequestSeq;
   const key = logScopeSelect.value;
   if (!key) {
     logEntries = [];
@@ -1736,6 +2158,9 @@ async function loadLogEntries() {
   }
 
   const data = await api(`/api/logs/${encodeURIComponent(key)}`);
+  if (seq !== logRequestSeq || logScopeSelect.value !== key) {
+    return;
+  }
   logEntries = data.entries || [];
   renderLogEntries();
   renderPhoneReport();
@@ -1869,7 +2294,12 @@ async function refreshHistory() {
     return;
   }
 
-  const data = await api(`/api/files/${encodeURIComponent(currentFile)}/history`);
+  const file = currentFile;
+  const data = await api(`/api/files/${encodeURIComponent(file)}/history`);
+  if (file !== currentFile) {
+    // Another phone was opened meanwhile; its own history is on the way.
+    return;
+  }
   renderHistory(data);
 }
 
@@ -2021,9 +2451,9 @@ async function restoreVersion(fileName, versionId) {
   const diff = detail.diff || [];
   const shown = diff.slice(0, 8).map((change) => {
     const hide = SENSITIVE_TAG_RE.test(change.key);
-    const before = hide ? "(hidden)" : (change.before ?? "(not set)");
-    const after = hide ? "(hidden)" : (change.after ?? "(removed)");
-    return `  ${change.key}: ${before} -> ${after}`;
+    const before = hide ? "(hidden)" : dialogText(change.before ?? "(not set)");
+    const after = hide ? "(hidden)" : dialogText(change.after ?? "(removed)");
+    return `  ${dialogText(change.key)}: ${before} -> ${after}`;
   });
   if (diff.length > shown.length) {
     shown.push(`  ...and ${diff.length - shown.length} more`);
@@ -2039,7 +2469,7 @@ async function restoreVersion(fileName, versionId) {
   }
 
   const ok = confirm(
-    `Restore ${fileName} to the version from ${describeVersion(detail.version)}?\n\n${effect}`
+    `Restore ${dialogText(fileName)} to the version from ${dialogText(describeVersion(detail.version), 120)}?\n\n${effect}`
       + (detail.currentExists ? "\n\nThe current file is kept first, so this can be undone." : "")
       + unsavedEditsWarning(fileName === currentFile)
   );
@@ -2180,7 +2610,7 @@ async function resyncCurrentPhone() {
   const station = baseline.entries?.find((e) => e.key === "Station_Display_Name")?.value || currentFile;
   const unsaved = JSON.stringify(readEntries()) !== JSON.stringify(baseline.entries || []);
   const ok = confirm(
-    `Tell ${station} to fetch its configuration from the PBX now?\n\n`
+    `Tell ${dialogText(station)} to fetch its configuration from the PBX now?\n\n`
       + (unsaved ? "The editor has unsaved changes; the phone will load what is on the PBX, not what is in the editor.\n\n" : "")
       + "The phone may restart if the change requires it."
   );
@@ -2202,9 +2632,15 @@ async function testResync() {
   }
 
   resyncTestOutput.hidden = true;
+  // Only an administrator may try out a command other than the saved server's own;
+  // for everyone else the test runs the command the connection already uses.
+  const request = { ext };
+  if (isAdmin()) {
+    request.resyncCommand = resyncCommandInput.value.trim();
+  }
   const result = await api("/api/resync/test", {
     method: "POST",
-    body: JSON.stringify({ ext, resyncCommand: resyncCommandInput.value.trim() })
+    body: JSON.stringify(request)
   });
 
   const lines = [`$ ${result.command}`, `exit status ${result.code}`];
@@ -2432,22 +2868,40 @@ for (const input of [cloneMacInput, cloneExtInput, cloneDisplayInput, clonePassw
 
 // --- replace and retire --------------------------------------------------------------------
 
-/** Empties the editor after the open phone has gone away; the list and selections stay. */
+/**
+ * Empties the editor: no phone is open afterwards, by name or by content. The list and
+ * the selections stay. Anything still on its way for the phone that was open (a load,
+ * the tail of a save) is disowned by the new epoch.
+ */
 function closeOpenPhone() {
+  editorEpoch += 1;
+  setEditorPending(null);
   currentFile = "";
   currentFileVersion = null;
   fileNameInput.value = "";
+  rootKeyInput.value = "flat-profile";
   historyBtn.hidden = true;
   historyPanel.hidden = true;
+  historyListEl.replaceChildren();
+  historyDiffBody.replaceChildren();
+  historyDiffEl.hidden = true;
   cloneBtn.hidden = true;
   clonePanel.hidden = true;
+  clonePasswordInput.value = "";
   replaceBtn.hidden = true;
   deletePhoneBtn.hidden = true;
   replacePanel.hidden = true;
   clearRows();
   setBaseline("flat-profile", []);
+  // The field count, which otherwise keeps saying what the closed phone had.
+  applyRowVisibility();
+  resetQuickButtonForm();
+  phoneModelChoice = null;
+  phoneModelSource = null;
   refreshQuickDirty();
   if (quickSchemaData) {
+    writeModelControls(quickControls, effectiveModelChoice());
+    updateModelNote();
     renderQuickButtons();
     renderQuickSettings();
   }
@@ -2491,8 +2945,8 @@ async function replacePhone() {
   }
   const source = currentFile;
   if (!confirm(
-    `Replace the hardware for ${currentStationLabel()}?\n\n`
-      + `${source} will be renamed to ${fileName}, so the new phone gets the same config. `
+    `Replace the hardware for ${dialogText(currentStationLabel(), 120)}?\n\n`
+      + `${dialogText(source)} will be renamed to ${dialogText(fileName)}, so the new phone gets the same config. `
       + `The old phone will no longer be provisioned.\n\n`
       + "A copy of the old file is kept in the Change Log."
   )) {
@@ -2519,7 +2973,7 @@ async function deleteOpenPhone() {
   }
   const fileName = currentFile;
   if (!confirm(
-    `Delete ${currentStationLabel()}?\n\n`
+    `Delete ${dialogText(currentStationLabel(), 120)}?\n\n`
       + "Its config file is removed from the PBX, so the phone will no longer be provisioned. "
       + "A copy is kept: Restore on its row in the Change Log brings it back."
       + unsavedEditsWarning(true)
@@ -2700,7 +3154,7 @@ async function createProvisionedPhones() {
   const count = checkedProvision.rows.length;
   if (!confirm(
     `Create ${count} phone${count === 1 ? "" : "s"} on the PBX now?\n\n`
-      + `Each is a copy of ${checkedProvision.sourceLabel} with its own MAC, extension and names.`
+      + `Each is a copy of ${dialogText(checkedProvision.sourceLabel, 120)} with its own MAC, extension and names.`
       + (checkedProvision.problems ? `\n\n${checkedProvision.problems} line${checkedProvision.problems === 1 ? "" : "s"} with problems will be skipped.` : "")
   )) {
     setStatus("Nothing was created.");
@@ -3056,18 +3510,12 @@ function exportLogCsv() {
   }
 
   const scope = logScopes.find((s) => s.key === logScopeSelect.value);
-  // Prefix a field starting with =,+,-,@ so spreadsheets do not treat it as a formula.
-  const cell = (v) => {
-    const s = String(v ?? "");
-    const safe = /^[=+\-@]/.test(s) ? `'${s}` : s;
-    return `"${safe.replace(/"/g, '""')}"`;
-  };
 
   const header = ["When", "User", "Action", "Phone", "File", "Tag", "Before", "After", "Result"];
-  const lines = [header.map(cell).join(",")];
+  const lines = [CsvRows.csvLine(header)];
 
   for (const entry of rows) {
-    lines.push([
+    lines.push(CsvRows.csvLine([
       formatTimestamp(entry.ts),
       entry.user || "",
       LOG_ACTION_LABEL[entry.action] || entry.action,
@@ -3077,18 +3525,11 @@ function exportLogCsv() {
       entry.before ?? "",
       entry.after ?? "",
       entry.status === "error" ? (entry.error || "Error") : "OK"
-    ].map(cell).join(","));
+    ]));
   }
 
   const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `pbx-change-log-${(scope?.label || "server").replace(/[^\w.-]+/g, "_")}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, `pbx-change-log-${(scope?.label || "server").replace(/[^\w.-]+/g, "_")}.csv`);
 
   setStatus(`Exported ${rows.length} log entr${rows.length === 1 ? "y" : "ies"}.`);
 }
@@ -3103,7 +3544,7 @@ async function clearCurrentLog() {
   const scope = logScopes.find((s) => s.key === key);
   const label = scope?.label || key;
 
-  if (!confirm(`Permanently delete the change log for "${label}"?\n\nThis removes ${scope?.entryCount || 0} recorded entries and cannot be undone.`)) {
+  if (!confirm(`Permanently delete the change log for "${dialogText(label)}"?\n\nThis removes ${scope?.entryCount || 0} recorded entries and cannot be undone.`)) {
     return;
   }
 
@@ -3139,6 +3580,12 @@ serverAuthSelect.addEventListener("change", syncAuthControls);
 
 /** Connects with the given form values; used by the bar and by the Settings form alike. */
 async function connectToPbx(body) {
+  // Only a saved server can be connected to, unless an administrator types one in.
+  if (!body.profileId && !isAdmin()) {
+    setStatus("Choose a saved server to connect to. Only an administrator can connect to a server that is not saved.", true);
+    return;
+  }
+
   const withKey = body.profileId ? serverUsesKey(body.profileId) : body.auth === "key";
   if (!withKey && !body.password) {
     setStatus("Password is required to connect.", true);
@@ -3147,7 +3594,6 @@ async function connectToPbx(body) {
   if (withKey) {
     delete body.password;
   }
-  lastConnectBody = { ...body };
 
   // Connecting to a different PBX replaces the open phone; the same one keeps it.
   const targetKey = connectionKeyOf({ profileId: body.profileId, host: (body.host || "").trim(), remoteDir: (body.remoteDir || "").trim() });
@@ -3162,13 +3608,21 @@ async function connectToPbx(body) {
     delete body.remoteDir;
   }
 
+  // Kept only until this attempt is settled (see the catch below).
+  lastConnectBody = { ...body };
   hideHostKeyWarning();
 
+  connectionChanging += 1;
   try {
-    const data = await api("/api/connect", {
-      method: "POST",
-      body: JSON.stringify(body)
-    });
+    let data;
+    try {
+      data = await api("/api/connect", {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+    } finally {
+      connectionChanging -= 1;
+    }
 
     if (data.connection?.profileId) {
       serverSelect.value = data.connection.profileId;
@@ -3180,7 +3634,11 @@ async function connectToPbx(body) {
     if (!samePbx) {
       clearWorkspace();
     }
+    // A new connection either way: replies to requests sent over the old one are late.
+    workspaceEpoch += 1;
     workspaceKey = newKey;
+    serverPbxKey = serverKeyOf(data.connection);
+    hidePbxChangedBar();
 
     lastConnectionInfo = data.connection || null;
     setConnectionCollapsed(true, data.connection || null);
@@ -3208,6 +3666,11 @@ async function connectToPbx(body) {
     if (error.data?.hostKeyMismatch) {
       showHostKeyWarning(error.data);
     }
+    // The attempt (and the password in it) is only worth keeping for the one case that
+    // repeats it: an administrator forgetting a changed host key.
+    if (!(error.data?.hostKeyMismatch && isAdmin())) {
+      lastConnectBody = null;
+    }
     setStatus(error.message, true);
   }
 }
@@ -3219,7 +3682,7 @@ forgetHostKeyBtn.addEventListener("click", async () => {
   }
 
   const confirmed = window.confirm(
-    `Forget the stored key for ${details.host}:${details.port} and trust the new one?\n\n`
+    `Forget the stored key for ${dialogText(details.host)}:${dialogText(details.port)} and trust the new one?\n\n`
       + "Only do this if you have confirmed the fingerprint on the PBX itself."
   );
   if (!confirmed) {
@@ -3265,53 +3728,93 @@ async function handleDisconnectClick() {
   if (!confirmDiscardEdits("disconnect")) {
     return;
   }
+  connectionChanging += 1;
   try {
     const result = await disconnectFromServer();
     clearWorkspace();
     workspaceKey = null;
+    serverPbxKey = null;
     lastConnectionInfo = null;
+    hidePbxChangedBar();
     setConnectionCollapsed(false);
     applyConnections(result.connections);
     setStatus("Disconnected");
   } catch (error) {
     setStatus(error.message, true);
+  } finally {
+    connectionChanging -= 1;
   }
 }
 
-/** Empties everything that belongs to one PBX: the open phone, the list and selections. */
+/**
+ * Empties everything that belongs to one PBX: the open phone, the list, the selections
+ * and every result that was read from it. Replies still on their way from it are
+ * disowned by the new epoch.
+ */
 function clearWorkspace() {
-  currentFile = "";
-  currentFileVersion = null;
+  workspaceEpoch += 1;
+  // The editor first: name, rows, count, history and the Quick tab, as when a phone is closed.
+  closeOpenPhone();
+
   registrations = null;
   regCountEl.hidden = true;
-  historyBtn.hidden = true;
-  historyPanel.hidden = true;
-  cloneBtn.hidden = true;
-  clonePanel.hidden = true;
-  replaceBtn.hidden = true;
-  deletePhoneBtn.hidden = true;
-  replacePanel.hidden = true;
   connectedScopeKey = null;
-  bulkRollbackBtn.hidden = true;
-  bulkRollbackResyncLabel.hidden = true;
   renderLogEntries();
   fileListEl.innerHTML = "";
-  clearRows();
-  setBaseline("flat-profile", []);
-  refreshQuickDirty();
   filesCountEl.textContent = "0 files";
   allFiles = [];
   selectedFiles.clear();
+  populateDriftBaselines();
+  populateProvisionSources();
+
+  // Bulk edit: nothing previewed or applied on the last PBX can be applied or rolled back here.
   onSelectionChanged();
+  previewedEdit = null;
+  lastAppliedJob = null;
+  bulkApplyBtn.disabled = true;
+  bulkRollbackBtn.hidden = true;
+  bulkRollbackResyncLabel.hidden = true;
+  bulkResultsEl.replaceChildren();
+
+  // A list checked against the last PBX is not checked against this one.
+  invalidateProvisionCheck();
+  provisionResultsEl.replaceChildren();
+  provisionCountEl.textContent = "No list checked yet";
+
+  // Search and drift results name the last PBX's phones.
+  lastFind = null;
+  findResultsEl.replaceChildren();
+  findCountEl.textContent = "Not searched yet";
+  findSelectBtn.hidden = true;
+  lastDrift = null;
+  driftResultsEl.replaceChildren();
+  driftCountEl.textContent = "Not run yet";
+  driftSelectBtn.hidden = true;
+
+  resyncTestOutput.hidden = true;
+  resyncTestOutput.textContent = "";
   renderPhoneReport();
 }
 
 // Which PBX the open phone, list and selections belong to, in the server's own terms.
 let workspaceKey = null;
+// The same PBX as the server names it, sent with every change (X-Pbx-Key) so one meant
+// for this PBX is refused if the session has since been moved to another.
+let serverPbxKey = null;
 
 function connectionKeyOf(conn) {
   if (!conn) return null;
   return conn.profileId ? `profile:${conn.profileId}` : `host:${conn.host || ""}|dir:${conn.remoteDir || ""}`;
+}
+
+/** The server's own key for a connection when it sends one, else the same thing worked out here. */
+function serverKeyOf(conn) {
+  if (!conn) return null;
+  return conn.key ? String(conn.key) : connectionKeyOf(conn);
+}
+
+function isSamePbx(a, b) {
+  return connectionKeyOf(a) === connectionKeyOf(b);
 }
 
 /**
@@ -3544,28 +4047,15 @@ function exportAuditCsv() {
     setStatus("Nothing to export.", true);
     return;
   }
-  // Prefix a field starting with =,+,-,@ so spreadsheets do not treat it as a formula.
-  const cell = (v) => {
-    const s = String(v ?? "");
-    const safe = /^[=+\-@]/.test(s) ? `'${s}` : s;
-    return `"${safe.replace(/"/g, '""')}"`;
-  };
-  const lines = [["When", "User", "Action", "Target", "Result", "Detail", "Address"].map(cell).join(",")];
+  const lines = [CsvRows.csvLine(["When", "User", "Action", "Target", "Result", "Detail", "Address"])];
   for (const entry of rows) {
-    lines.push([
+    lines.push(CsvRows.csvLine([
       formatTimestamp(entry.ts), entry.user, AUDIT_ACTION_LABEL[entry.action] || entry.action,
       entry.target, entry.ok ? "OK" : "Failed", entry.detail, entry.ip
-    ].map(cell).join(","));
+    ]));
   }
   const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "pbx-audit-log.csv";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, "pbx-audit-log.csv");
   setStatus(`Exported ${rows.length} audit entr${rows.length === 1 ? "y" : "ies"}.`);
 }
 
@@ -3609,6 +4099,11 @@ function showPage(name, panelId = null) {
   }
   if (location.hash.replace(/^#/, "") !== page) {
     history[navigate](null, "", `#${page}`);
+  }
+
+  if (changed && page === "reporting") {
+    // The phone table measures its rows to cap its height, which only works once it shows.
+    renderPhoneReport();
   }
 
   if (changed && page === "reporting" && currentUser?.role === "admin") {
@@ -3840,12 +4335,14 @@ function sipServerForQuick() {
   return (lastConnectionInfo?.sipServer || sipServerInput.value || "").trim();
 }
 
-/** Entries as they currently stand in the Advanced table. */
+/** Entries as they currently stand in the Advanced table. Rows marked for deletion are not part of the config. */
 function readEntriesRaw() {
-  return [...entriesBody.querySelectorAll("tr")].map((tr) => ({
-    key: tr.querySelector(".tag").value.trim(),
-    value: tr.querySelector(".value").value
-  })).filter((e) => e.key);
+  return [...entriesBody.querySelectorAll("tr")]
+    .filter((tr) => !tr.classList.contains("deleted"))
+    .map((tr) => ({
+      key: tr.querySelector(".tag").value.trim(),
+      value: tr.querySelector(".value").value
+    })).filter((e) => e.key);
 }
 
 function readLineKeyFromEditor(index) {
@@ -3925,6 +4422,20 @@ function openQuickButton(index) {
   quickForm.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
+/**
+ * Closes the button form and forgets what it held. Its values (a line's extension and
+ * SIP password among them) were read from one phone and must never be typed on into
+ * the next, so every load, close and change of PBX comes through here.
+ */
+function resetQuickButtonForm() {
+  quickEditingIndex = null;
+  quickFieldValues = {};
+  quickForm.hidden = true;
+  quickFieldsEl.replaceChildren();
+  quickPreviewEl.textContent = "-";
+  quickPreviewEl.classList.remove("is-error");
+}
+
 /** Each button type needs different inputs, so the form is built from the schema. */
 function renderQuickFields() {
   const def = quickSchemaData?.lineKeyTypes.find((t) => t.id === quickTypeSelect.value);
@@ -3939,6 +4450,12 @@ function renderQuickFields() {
     input.placeholder = def.placeholders[field] || "";
     if (field === "custom") {
       input.className = "mono";
+    }
+    if (field === "password") {
+      // Masked like any other password; "new-password" keeps a password manager from
+      // filling in the operator's own.
+      input.type = "password";
+      input.autocomplete = "new-password";
     }
     input.addEventListener("input", () => {
       quickFieldValues[field] = input.value;
@@ -3982,6 +4499,10 @@ function renderQuickSettings() {
     const label = document.createElement("label");
     label.textContent = setting.label;
     const input = document.createElement("input");
+    if (setting.sensitive) {
+      input.type = "password";
+      input.autocomplete = "new-password";
+    }
     input.placeholder = setting.placeholder || "";
     input.value = QuickConfig.readSetting(setting.id, entries);
     label.appendChild(input);
@@ -4025,7 +4546,10 @@ function mergeIntoEditor(produced) {
         try { existing = JSON.parse(attrsInput.value || "{}"); } catch { existing = {}; }
         attrsInput.value = JSON.stringify({ ...existing, ...item.attributes });
       }
-      row.classList.remove("deleted");
+      // Writing to a row marked for deletion brings it back, button label included.
+      if (row.classList.contains("deleted")) {
+        toggleDeletedRow(row);
+      }
     } else {
       addRow({ key: item.key, value: item.value, attributes: item.attributes || {} });
     }
@@ -4040,14 +4564,23 @@ async function applyQuickChange(produced, description) {
       return;
     }
 
-    previewedEdit = {
+    const request = {
       fileNames: [...selectedFiles],
       edits: produced.map((p) => ({ key: p.key, value: p.value, attributes: p.attributes || null, mode: "set" })),
       description
     };
 
+    // Whatever was previewed before no longer backs the Apply button, and this edit
+    // only does once its own preview has come back.
+    invalidatePreview();
+    const epoch = previewEpoch;
+
     // Route through the same preview-then-confirm path as a manual bulk edit.
-    const job = await runBulkJobWithProgress(previewedEdit, { dryRun: true, verb: "Previewing" });
+    const job = await runBulkJobWithProgress(request, { dryRun: true, verb: "Previewing" });
+    if (epoch !== previewEpoch) {
+      discardOutdatedPreview();
+      return;
+    }
     renderBulkResults(job);
 
     const changeCount = job.summary?.changed || 0;
@@ -4058,6 +4591,7 @@ async function applyQuickChange(produced, description) {
       return;
     }
 
+    previewedEdit = request;
     bulkApplyBtn.disabled = false;
     setStatus(`${description}: ${changeCount} phone${changeCount === 1 ? "" : "s"} would change. Review below, then Apply to PBX.`);
     document.getElementById("bulk-results").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -4087,7 +4621,7 @@ function editorIsDirty() {
 
 /** The name to call the editor's contents by in a warning. */
 function editorSubject() {
-  return currentFile || fileNameInput.value.trim() || "the new phone";
+  return dialogText(currentFile || fileNameInput.value.trim() || "the new phone");
 }
 
 /**
@@ -4311,12 +4845,31 @@ function hideAuthOverlay() {
   authOverlay.hidden = true;
   document.body.classList.remove("auth-locked");
   setAuthMessage("");
+  forgetEnrolmentSecrets(null);
+}
+
+/**
+ * The authenticator secret, its QR code and the recovery codes are shown once, on their
+ * own steps. Leaving a step takes them out of the page, so nothing is left behind a
+ * hidden element for whoever uses this browser next.
+ */
+function forgetEnrolmentSecrets(stepShown) {
+  if (stepShown !== "enrol") {
+    document.getElementById("enrol-qr").removeAttribute("src");
+    document.getElementById("enrol-secret").value = "";
+    document.getElementById("enrol-code").value = "";
+  }
+  if (stepShown !== "codes") {
+    document.getElementById("recovery-code-list").textContent = "";
+    issuedRecoveryCodes = [];
+  }
 }
 
 function setAuthStep(step) {
   for (const [name, el] of Object.entries(AUTH_STEPS)) {
     el.hidden = name !== step;
   }
+  forgetEnrolmentSecrets(step);
   authTitle.textContent = AUTH_TITLES[step] || "Sign in";
   setAuthMessage("");
   // The passkey button only helps where the browser can actually use one.
@@ -4344,12 +4897,60 @@ function canWrite() {
   return Boolean(currentUser) && currentUser.role !== "viewer";
 }
 
+/** Whether the signed-in account manages the app itself: saved servers, users, logs, keys. */
+function isAdmin() {
+  return currentUser?.role === "admin";
+}
+
+// A saved server's settings. Everyone can read them (and connect through the server);
+// only an administrator can change them, so for everyone else they are greyed out.
+const PROFILE_FIELDS = [
+  serverNameInput,
+  connectForm.elements.host,
+  connectForm.elements.port,
+  connectForm.elements.username,
+  connectForm.elements.remoteDir,
+  serverAuthSelect,
+  sipServerInput,
+  resyncCommandInput,
+  statusCommandInput,
+  profileModelSelect,
+  profileKemsSelect,
+  profileCustomKeysInput
+];
+
+/**
+ * Completes a sign-in. When the session before it ran out under a different account,
+ * the page is loaded afresh instead, so nothing that account had open (a phone, its
+ * unsaved edits, lists, logs) is handed to the next person. False when that happens.
+ */
+function acceptSignIn(data) {
+  if (expiredUserId && data.user && data.user.id !== expiredUserId) {
+    location.reload();
+    return false;
+  }
+  expiredUserId = null;
+  applyIdentity(data.user, data.csrfToken);
+  return true;
+}
+
 /** Applies the signed-in identity to the chrome and reveals admin-only controls. */
 function applyIdentity(user, token) {
+  const previous = currentUser;
   currentUser = user;
   csrfToken = token;
-  document.body.classList.toggle("role-viewer", Boolean(user) && user.role === "viewer");
   if (user) {
+    // Replies to anything sent under an earlier session are late from here on.
+    identityEpoch += 1;
+  }
+  const admin = Boolean(user) && user.role === "admin";
+  document.body.classList.toggle("role-viewer", Boolean(user) && user.role === "viewer");
+  document.body.classList.toggle("role-admin", admin);
+  for (const field of PROFILE_FIELDS) {
+    field.disabled = Boolean(user) && !admin;
+  }
+  document.getElementById("servers-admin-note").hidden = !user || admin;
+  if (user && (!previous || previous.id !== user.id)) {
     showTab(preferredEditorTab());
   }
 
@@ -4463,20 +5064,33 @@ document.getElementById("version-check-enabled").addEventListener("change", asyn
   }
 });
 
+/**
+ * Asks the server who is signed in and applies the answer. Throws when the server
+ * cannot be reached or does not answer in kind; callers decide how to say so.
+ */
 async function refreshIdentity() {
-  const meRes = await fetch("/api/auth/me");
+  const meRes = await fetch("/api/auth/me", { cache: "no-store" });
   noticeVersion(meRes);
-  const me = await meRes.json();
-
-  if (me.setupRequired) {
-    applyIdentity(null, null);
-    showAuthOverlay("setup");
-    return false;
+  if (!meRes.ok) {
+    throw new Error(`The server answered ${meRes.status} when asked who is signed in.`);
+  }
+  let me = null;
+  try {
+    me = await meRes.json();
+  } catch {
+    me = null;
+  }
+  if (me === null || typeof me !== "object") {
+    throw new Error("The server sent a reply this page could not read.");
   }
 
-  if (!me.authenticated) {
+  if (me.setupRequired || !me.authenticated) {
+    // Whoever was signed in no longer is; remember them in case somebody else is next.
+    if (currentUser) {
+      expiredUserId = currentUser.id;
+    }
     applyIdentity(null, null);
-    showAuthOverlay("login");
+    showAuthOverlay(me.setupRequired ? "setup" : "login");
     return false;
   }
 
@@ -4498,7 +5112,11 @@ authSetupForm.addEventListener("submit", async (e) => {
 
   try {
     const data = await api("/api/auth/setup", { method: "POST", body: JSON.stringify({ username, password }) });
-    applyIdentity(data.user, data.csrfToken);
+    document.getElementById("setup-password").value = "";
+    document.getElementById("setup-password2").value = "";
+    if (!acceptSignIn(data)) {
+      return;
+    }
     await beginEnrolment();
   } catch (error) {
     setAuthMessage(error.message);
@@ -4520,7 +5138,9 @@ authLoginForm.addEventListener("submit", async (e) => {
       return;
     }
 
-    applyIdentity(data.user, data.csrfToken);
+    if (!acceptSignIn(data)) {
+      return;
+    }
     // Nudge, do not force: an operator locked out mid-incident helps nobody.
     if (data.mfaSetupRequired) {
       await beginEnrolment();
@@ -4540,7 +5160,10 @@ authMfaForm.addEventListener("submit", async (e) => {
       body: JSON.stringify({ pendingToken: pendingLoginToken, code: document.getElementById("auth-mfa-code").value })
     });
     document.getElementById("auth-mfa-code").value = "";
-    applyIdentity(data.user, data.csrfToken);
+    pendingLoginToken = null;
+    if (!acceptSignIn(data)) {
+      return;
+    }
     await onSignedIn();
   } catch (error) {
     setAuthMessage(error.message);
@@ -4555,7 +5178,10 @@ authRecoveryForm.addEventListener("submit", async (e) => {
       body: JSON.stringify({ pendingToken: pendingLoginToken, code: document.getElementById("auth-recovery-code").value })
     });
     document.getElementById("auth-recovery-code").value = "";
-    applyIdentity(data.user, data.csrfToken);
+    pendingLoginToken = null;
+    if (!acceptSignIn(data)) {
+      return;
+    }
     await onSignedIn();
     setStatus(`Signed in with a recovery code. ${data.recoveryCodesRemaining} remaining.`, data.recoveryCodesRemaining === 0);
   } catch (error) {
@@ -4575,7 +5201,12 @@ async function beginEnrolment({ offerPasskey = true } = {}) {
     prepareEnrolPasskey(offerPasskey);
     showAuthOverlay("enrol");
   } catch (error) {
-    setAuthMessage(error.message);
+    // From Account the sign-in screen is not showing, so its message line would not be seen.
+    if (authOverlay.hidden) {
+      setStatus(error.message, true);
+    } else {
+      setAuthMessage(error.message);
+    }
   }
 }
 
@@ -4585,9 +5216,13 @@ document.getElementById("enrol-confirm").addEventListener("click", async () => {
       method: "POST",
       body: JSON.stringify({ code: document.getElementById("enrol-code").value })
     });
+    // The account is enrolled from here on; the Account panel reads this.
+    if (currentUser) {
+      currentUser.mfaEnrolled = true;
+    }
+    setAuthStep("codes");
     issuedRecoveryCodes = data.recoveryCodes || [];
     document.getElementById("recovery-code-list").textContent = issuedRecoveryCodes.join("\n");
-    setAuthStep("codes");
   } catch (error) {
     setAuthMessage(error.message);
   }
@@ -4645,21 +5280,23 @@ document.getElementById("enrol-add-passkey").addEventListener("click", async () 
   }
 });
 
-document.getElementById("recovery-copy").addEventListener("click", () => {
-  navigator.clipboard?.writeText(issuedRecoveryCodes.join("\n"));
-  setAuthMessage("Copied to clipboard.", false);
+document.getElementById("recovery-copy").addEventListener("click", async () => {
+  // The clipboard only exists on HTTPS (or localhost) and can be refused; "copied" is
+  // only said when it was, since these codes cannot be shown again.
+  try {
+    if (!navigator.clipboard) {
+      throw new Error("No clipboard access");
+    }
+    await navigator.clipboard.writeText(issuedRecoveryCodes.join("\n"));
+    setAuthMessage("Copied to clipboard.", false);
+  } catch {
+    setAuthMessage("Could not copy from here. Select the codes and copy them by hand, or use Download.");
+  }
 });
 
 document.getElementById("recovery-download").addEventListener("click", () => {
   const blob = new Blob([issuedRecoveryCodes.join("\r\n")], { type: "text/plain" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "pbx-manager-recovery-codes.txt";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, "pbx-manager-recovery-codes.txt");
 });
 
 document.getElementById("recovery-done").addEventListener("click", async () => {
@@ -4671,18 +5308,25 @@ logoutBtn.addEventListener("click", async () => {
   if (!confirmDiscardEdits("sign out")) {
     return;
   }
+  logoutBtn.disabled = true;
   try {
     await api("/api/auth/logout", { method: "POST", body: "{}" });
-  } catch {
-    // Signing out locally is what matters even if the call failed.
+  } catch (error) {
+    // The session lives on the server (its cookie cannot be dropped from here), so only
+    // the server's word ends it. 401 means it was already over; anything else means it
+    // is still open and the page must not pretend otherwise.
+    if (error.status !== 401) {
+      logoutBtn.disabled = false;
+      setStatus("Sign-out failed, try again.", true);
+      return;
+    }
   }
-  applyIdentity(null, null);
-  currentFile = "";
-  allFiles = [];
-  selectedFiles.clear();
-  fileListEl.innerHTML = "";
-  clearRows();
-  showAuthOverlay("login");
+  // A fresh page: nothing this account had open (a phone, lists, logs, anything typed)
+  // stays behind for whoever signs in next. The unsaved-edits question was asked above.
+  expiredUserId = null;
+  currentUser = null;
+  csrfToken = null;
+  location.reload();
 });
 
 // The name in the header is the way to your own account settings.
@@ -4752,7 +5396,9 @@ async function signInWithPasskey() {
     const { token, options } = await api("/api/auth/passkeys/login/options", { method: "POST", body: "{}" });
     const cred = await navigator.credentials.get({ publicKey: webauthnOptionsFromJson(options, "get") });
     const data = await api("/api/auth/passkeys/login/verify", { method: "POST", body: JSON.stringify({ token, response: webauthnCredentialToJson(cred) }) });
-    applyIdentity(data.user, data.csrfToken);
+    if (!acceptSignIn(data)) {
+      return;
+    }
     await onSignedIn();
   } catch (error) {
     // The browser throws NotAllowedError when the prompt is cancelled or times out.
@@ -4801,14 +5447,15 @@ function renderPasskeys(list) {
     name.textContent = p.name;
     const meta = document.createElement("div");
     meta.className = "passkey-meta";
-    meta.textContent = `Added ${formatTimestamp(Math.floor(p.createdAt / 1000))}${p.lastUsedAt ? `, last used ${formatTimestamp(Math.floor(p.lastUsedAt / 1000))}` : ", never used"}${p.backedUp ? ", synced" : ""}`;
+    // Both times are in milliseconds, as formatTimestamp expects.
+    meta.textContent = `Added ${formatTimestamp(p.createdAt)}${p.lastUsedAt ? `, last used ${formatTimestamp(p.lastUsedAt)}` : ", never used"}${p.backedUp ? ", synced" : ""}`;
     text.append(name, meta);
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "ghost-danger small";
     remove.textContent = "Remove";
     remove.addEventListener("click", async () => {
-      if (!confirm(`Remove the passkey "${p.name}"? You can still sign in with your password.`)) return;
+      if (!confirm(`Remove the passkey "${dialogText(p.name)}"? You can still sign in with your password.`)) return;
       try {
         const data = await api(`/api/auth/passkeys/${encodeURIComponent(p.id)}`, { method: "DELETE" });
         renderPasskeys(data.passkeys);
@@ -4850,6 +5497,9 @@ function renderAccountPanel() {
   document.getElementById("account-mfa-state").textContent = `Two-factor: ${enrolled ? "on" : "off"}`;
   document.getElementById("acct-enable-mfa").hidden = enrolled;
   document.getElementById("acct-disable-mfa").hidden = !enrolled;
+  if (!enrolled) {
+    closeDisableMfaForm();
+  }
   if (currentUser) loadPasskeys();
 }
 
@@ -4869,18 +5519,46 @@ document.getElementById("acct-editor-tab").addEventListener("change", async (e) 
 
 document.getElementById("acct-enable-mfa").addEventListener("click", () => beginEnrolment({ offerPasskey: false }));
 
-document.getElementById("acct-disable-mfa").addEventListener("click", async () => {
-  const password = prompt("Confirm your password to turn off two-factor authentication:");
+// Turning two-factor off asks for the account password in a masked field of its own,
+// shown under the button (a browser prompt would show the password as it is typed).
+const disableMfaForm = document.getElementById("acct-disable-mfa-form");
+const disableMfaPassword = document.getElementById("acct-disable-mfa-password");
+
+function closeDisableMfaForm() {
+  disableMfaPassword.value = "";
+  disableMfaForm.hidden = true;
+}
+
+async function disableMfa() {
+  const password = disableMfaPassword.value;
   if (!password) {
+    setStatus("Enter your password to turn off two-factor authentication.", true);
+    disableMfaPassword.focus();
     return;
   }
   try {
     await api("/api/auth/mfa/disable", { method: "POST", body: JSON.stringify({ password }) });
+    closeDisableMfaForm();
     await refreshIdentity();
     renderAccountPanel();
     setStatus("Two-factor authentication turned off.", true);
   } catch (error) {
+    disableMfaPassword.value = "";
     setStatus(error.message, true);
+  }
+}
+
+document.getElementById("acct-disable-mfa").addEventListener("click", () => {
+  disableMfaPassword.value = "";
+  disableMfaForm.hidden = false;
+  disableMfaPassword.focus();
+});
+document.getElementById("acct-disable-mfa-confirm").addEventListener("click", disableMfa);
+document.getElementById("acct-disable-mfa-cancel").addEventListener("click", closeDisableMfaForm);
+disableMfaPassword.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    disableMfa();
   }
 });
 
@@ -4936,7 +5614,7 @@ async function refreshUsers() {
     resetBtn2.className = "secondary small";
     resetBtn2.textContent = "Reset MFA";
     resetBtn2.addEventListener("click", async () => {
-      if (!confirm(`Reset two-factor for "${user.username}"?\n\nThey will sign in with their password alone until they enrol again.`)) {
+      if (!confirm(`Reset two-factor for "${dialogText(user.username)}"?\n\nThey will sign in with their password alone until they enrol again.`)) {
         return;
       }
       try {
@@ -4976,7 +5654,7 @@ async function refreshUsers() {
       del.className = "ghost-danger small";
       del.textContent = "Delete";
       del.addEventListener("click", async () => {
-        if (!confirm(`Delete the account "${user.username}"?\n\nThis cannot be undone. Their entries stay in the change log.`)) {
+        if (!confirm(`Delete the account "${dialogText(user.username)}"?\n\nThis cannot be undone. Their entries stay in the change log.`)) {
           return;
         }
         try {
@@ -5028,15 +5706,32 @@ async function onSignedIn() {
     const data = await api("/api/status");
     applyConnections(data.connections);
     if (data.connected && data.connection) {
-      lastConnectionInfo = data.connection;
-      workspaceKey = connectionKeyOf(data.connection);
-      setConnectionCollapsed(true, data.connection);
-      setStatus(`Connected: ${data.connection.host} (${data.connection.remoteDir})`);
-      if (data.connection.profileId) {
-        serverSelect.value = data.connection.profileId;
-        fillFormFromServer(data.connection.profileId);
+      if (workspaceKey && connectionKeyOf(data.connection) !== workspaceKey) {
+        // Signed in again with a page that still shows another PBX than the session is on.
+        handlePbxMoved(data.connection);
+      } else {
+        if (!lastConnectionInfo) {
+          // Newly on this PBX (first load, or back after a lost connection): replies
+          // to anything sent before are late.
+          workspaceEpoch += 1;
+        }
+        lastConnectionInfo = data.connection;
+        workspaceKey = connectionKeyOf(data.connection);
+        serverPbxKey = serverKeyOf(data.connection);
+        setConnectionCollapsed(true, data.connection);
+        setStatus(`Connected: ${data.connection.host} (${data.connection.remoteDir})`);
+        if (data.connection.profileId) {
+          serverSelect.value = data.connection.profileId;
+          fillFormFromServer(data.connection.profileId);
+        }
+        await refreshFiles();
       }
-      await refreshFiles();
+    } else if (lastConnectionInfo) {
+      // The page shows a PBX the session is no longer on: same as a dropped connection.
+      handleConnectionLost({
+        error: data.lostMessage || "This session is not connected to a PBX any more. Reconnect to continue.",
+        lastDisconnect: data.lastDisconnect
+      });
     } else {
       setConnectionCollapsed(false);
       if (data.lostMessage) {
@@ -5055,10 +5750,20 @@ async function onSignedIn() {
 }
 
 (async function init() {
-  applyTheme(localStorage.getItem("pbx-theme") || "light");
+  applyTheme(readStored("pbx-theme") || "light");
 
   // Nothing loads until we know who (if anyone) is signed in.
-  const signedIn = await refreshIdentity();
+  let signedIn = false;
+  try {
+    signedIn = await refreshIdentity();
+  } catch (error) {
+    // The server could not be asked. Show the sign-in screen with the reason, rather
+    // than an app that looks open and answers nothing.
+    applyIdentity(null, null);
+    showAuthOverlay("login");
+    setAuthMessage(`Could not reach the server (${String(error.message).replace(/\.$/, "")}). Reload the page to try again.`);
+    return;
+  }
   if (signedIn) {
     await onSignedIn();
   }

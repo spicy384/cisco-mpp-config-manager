@@ -158,5 +158,20 @@
     return mapPhoneRows(parseDelimited(text));
   }
 
-  return { detectDelimiter, parseDelimited, mapPhoneRows, parsePhoneList, macToFileName, COLUMN_ORDER };
+  /**
+   * One cell of an exported CSV. A spreadsheet runs a cell as a formula when it starts
+   * with = + - or @, and some strip leading blanks, tabs or line breaks before deciding,
+   * so those get an apostrophe in front and are shown as the text they are.
+   */
+  function csvCell(value) {
+    const text = String(value == null ? "" : value);
+    const safe = /^(?:\s*[=+\-@]|[\t\r\n])/.test(text) ? `'${text}` : text;
+    return `"${safe.replace(/"/g, '""')}"`;
+  }
+
+  function csvLine(cells) {
+    return cells.map(csvCell).join(",");
+  }
+
+  return { detectDelimiter, parseDelimited, mapPhoneRows, parsePhoneList, macToFileName, csvCell, csvLine, COLUMN_ORDER };
 }));

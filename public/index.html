@@ -58,7 +58,7 @@
       <p id="auth-message" class="auth-message" hidden></p>
 
       <!-- Step 1: username + password -->
-      <form id="auth-login-form" class="auth-form">
+      <form id="auth-login-form" class="auth-form" method="post">
         <label>Username <input id="auth-username" autocomplete="username" required /></label>
         <label>Password <input id="auth-password" type="password" autocomplete="current-password" required /></label>
         <button type="submit">Sign in</button>
@@ -69,7 +69,7 @@
       </form>
 
       <!-- Step 2: authenticator code -->
-      <form id="auth-mfa-form" class="auth-form" hidden>
+      <form id="auth-mfa-form" class="auth-form" method="post" hidden>
         <label>Authentication code
           <input id="auth-mfa-code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" />
         </label>
@@ -78,16 +78,16 @@
       </form>
 
       <!-- Step 2 (alternate): recovery code -->
-      <form id="auth-recovery-form" class="auth-form" hidden>
+      <form id="auth-recovery-form" class="auth-form" method="post" hidden>
         <label>Recovery code
-          <input id="auth-recovery-code" placeholder="xxxxxxxx-xxxxxxxx" />
+          <input id="auth-recovery-code" placeholder="xxxxxxxx-xxxxxxxx" autocomplete="off" />
         </label>
         <button type="submit">Sign in</button>
         <button type="button" id="auth-use-totp" class="link-btn">Back to authenticator code</button>
       </form>
 
       <!-- First run -->
-      <form id="auth-setup-form" class="auth-form" hidden>
+      <form id="auth-setup-form" class="auth-form" method="post" hidden>
         <p class="auth-hint">No accounts exist yet. Create the first administrator.</p>
         <label>Username <input id="setup-username" autocomplete="username" placeholder="admin" /></label>
         <label>Password (12 characters minimum)
@@ -102,10 +102,10 @@
         <p class="auth-hint">Scan this with your authenticator app, then enter the code it shows.</p>
         <img id="enrol-qr" class="enrol-qr" alt="TOTP enrolment QR code" />
         <label>Or enter this secret manually
-          <input id="enrol-secret" class="mono" readonly />
+          <input id="enrol-secret" class="mono" readonly autocomplete="off" />
         </label>
         <label>Code from your app
-          <input id="enrol-code" inputmode="numeric" placeholder="123456" />
+          <input id="enrol-code" inputmode="numeric" placeholder="123456" autocomplete="off" />
         </label>
         <div class="actions">
           <button type="button" id="enrol-confirm">Enable two-factor</button>
@@ -158,11 +158,11 @@
         <button type="button" id="disconnect-mini-btn" class="secondary small writer-only">Disconnect</button>
       </div>
 
-      <form id="quick-connect-form" class="quick-connect">
+      <form id="quick-connect-form" class="quick-connect" method="post">
         <span class="conn-dot is-off" aria-hidden="true"></span>
         <strong>Not connected</strong>
         <select id="quick-server" aria-label="Saved PBX server"></select>
-        <input id="quick-password" type="password" placeholder="Password" aria-label="Password" autocomplete="off" />
+        <input id="quick-password" type="password" placeholder="Password" aria-label="Password" autocomplete="new-password" />
         <button type="submit">Connect</button>
         <button type="button" id="manage-servers-btn" class="secondary">Manage Servers</button>
         <span id="live-links" class="live-links" hidden></span>
@@ -392,7 +392,7 @@
         <div class="toolbar">
           <button id="save-top-btn" type="button" class="writer-only">Save / Upload</button>
           <button id="resync-top-btn" type="button" class="secondary writer-only" title="Tell this phone to fetch its configuration now">Resync Phone</button>
-          <button id="create-top-btn" type="button" class="secondary">Create New</button>
+          <button id="create-top-btn" type="button" class="secondary writer-only">Create New</button>
           <button id="reset-top-btn" type="button" class="secondary">Reset</button>
           <span class="toolbar-divider" aria-hidden="true"></span>
           <button id="show-all-top-btn" type="button" class="secondary">Show All Fields</button>
@@ -674,7 +674,7 @@
         </label>
         <button id="log-refresh-btn" type="button" class="secondary">Refresh</button>
         <button id="log-export-btn" type="button" class="secondary">Export CSV</button>
-        <button id="log-clear-btn" type="button" class="ghost-danger writer-only">Clear Log</button>
+        <button id="log-clear-btn" type="button" class="ghost-danger writer-only admin-only">Clear Log</button>
       </div>
 
       <div id="log-results" class="bulk-results"></div>
@@ -716,8 +716,12 @@
         A saved server keeps everything about a PBX except its password. Choose one to edit it,
         or fill in the fields for a new one. Connect from the bar at the top of any page, or here.
       </p>
+      <p id="servers-admin-note" class="bulk-hint" hidden>
+        Saved servers are managed by an administrator. Choose one to connect to it; its settings
+        are shown here but cannot be changed.
+      </p>
 
-      <form id="connect-form">
+      <form id="connect-form" method="post">
         <label>Saved PBX Servers
           <select id="server-select" name="profileId">
             <option value="">(Direct connection / no saved server selected)</option>
@@ -740,7 +744,7 @@
             <option value="key">The app's SSH key (see SSH Key below)</option>
           </select>
         </label>
-        <label id="server-password-label">Password (only needed to connect from here) <input name="password" type="password" autocomplete="off" /></label>
+        <label id="server-password-label">Password (only needed to connect from here) <input name="password" type="password" autocomplete="new-password" /></label>
         <label>Remote XML Directory <input name="remoteDir" placeholder="/tftpboot" /></label>
         <label>SIP Server for speed dial / BLF (optional)
           <input id="sip-server" placeholder="pbx.example.com:5060" />
@@ -772,10 +776,10 @@
 
         <div class="actions">
           <button type="submit">Connect</button>
-          <button type="button" id="save-server-btn" class="secondary writer-only">Save Server</button>
+          <button type="button" id="save-server-btn" class="secondary writer-only admin-only">Save Server</button>
           <button type="button" id="disconnect-btn" class="secondary writer-only">Disconnect</button>
           <span class="actions-spacer"></span>
-          <button type="button" id="delete-server-btn" class="ghost-danger writer-only">Delete Server</button>
+          <button type="button" id="delete-server-btn" class="ghost-danger writer-only admin-only">Delete Server</button>
         </div>
       </form>
     </section>
@@ -845,8 +849,8 @@
       </p>
 
       <div class="bulk-controls">
-        <label>Username <input id="new-username" placeholder="operator" /></label>
-        <label>Password (12 characters minimum) <input id="new-password" type="password" /></label>
+        <label>Username <input id="new-username" placeholder="operator" autocomplete="off" /></label>
+        <label>Password (12 characters minimum) <input id="new-password" type="password" autocomplete="new-password" /></label>
         <label>Role
           <select id="new-role">
             <option value="user">User</option>
@@ -879,8 +883,8 @@
         </div>
         <div>
           <h3 class="account-heading">Change password</h3>
-          <label>Current password <input id="acct-current" type="password" /></label>
-          <label>New password (12 characters minimum) <input id="acct-new" type="password" /></label>
+          <label>Current password <input id="acct-current" type="password" autocomplete="current-password" /></label>
+          <label>New password (12 characters minimum) <input id="acct-new" type="password" autocomplete="new-password" /></label>
           <div class="actions">
             <button id="acct-change-password" type="button">Change password</button>
           </div>
@@ -894,6 +898,15 @@
           <div class="actions">
             <button id="acct-enable-mfa" type="button">Set up two-factor</button>
             <button id="acct-disable-mfa" type="button" class="ghost-danger" hidden>Turn off two-factor</button>
+          </div>
+          <div id="acct-disable-mfa-form" class="inline-confirm" hidden>
+            <label>Your password, to turn off two-factor
+              <input id="acct-disable-mfa-password" type="password" autocomplete="current-password" />
+            </label>
+            <div class="actions">
+              <button id="acct-disable-mfa-confirm" type="button" class="danger">Turn off two-factor</button>
+              <button id="acct-disable-mfa-cancel" type="button" class="secondary">Cancel</button>
+            </div>
           </div>
         </div>
 

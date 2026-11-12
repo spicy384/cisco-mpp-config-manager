@@ -1822,6 +1822,18 @@ body.role-viewer .writer-only {
   color: var(--text-muted);
 }
 
+/* Saved servers and clearing a change log are an administrator's to manage; nobody
+   else is shown the controls (the server refuses them anyway). */
+body:not(.role-admin) .admin-only {
+  display: none !important;
+}
+
+/* A save or a load is on its way to or from the PBX: the list waits for it. */
+#file-list.is-busy {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
 /* Buttons are inline-flex, which would otherwise override the hidden attribute. */
 [hidden] {
   display: none !important;
@@ -1933,4 +1945,13 @@ body.role-viewer .writer-only {
   background: var(--primary-soft);
   color: var(--text);
   font-size: 13px;
+}
+
+/* The same kind of standing notice, for a page that shows one PBX while its session works
+   on another. It is a warning, and sits above the update notice so both can be read. */
+.update-bar.pbx-changed-bar {
+  bottom: calc(76px + env(safe-area-inset-bottom));
+  max-width: min(calc(100vw - 32px), 720px);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: var(--danger-soft);
 }

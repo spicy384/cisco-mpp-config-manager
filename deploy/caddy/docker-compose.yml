@@ -4,8 +4,16 @@
 # to the app over the internal Docker network. The app itself publishes no ports,
 # so the only way in is through Caddy over HTTPS.
 #
-#   cp .env.example .env     # set your domain and email
+# No source checkout is needed, only these three files:
+#
+#   mkdir -p ~/pbx-manager && cd ~/pbx-manager
+#   curl -fsSLO https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/caddy/docker-compose.yml
+#   curl -fsSLO https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/caddy/Caddyfile
+#   curl -fsSL  https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/caddy/.env.example -o .env
+#   nano .env                # set your domain and email
 #   docker compose up -d
+#
+# Update: docker compose pull && docker compose up -d
 #
 # Requirements for automatic certificates:
 #   - a real domain whose DNS A/AAAA record points at this host
@@ -50,10 +58,9 @@ services:
         max-file: "3"
 
   pbx-manager:
-    build:
-      context: ../..
-    # Published image (docker compose pull), or build from the checkout with --build.
-    image: ghcr.io/spicy384/cisco-mpp-config-manager:latest
+    # The published image. "latest" follows the main branch; set PBX_VERSION in .env
+    # (for example 1.0.3) to stay on a release.
+    image: ghcr.io/spicy384/cisco-mpp-config-manager:${PBX_VERSION:-latest}
     container_name: pbx-manager
     restart: unless-stopped
 

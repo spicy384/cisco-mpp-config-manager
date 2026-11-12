@@ -1,11 +1,23 @@
+# PBX MPP Config Manager - runs the published image; no source checkout is needed.
+#
+# This file is all a server needs besides Docker:
+#
+#   mkdir -p ~/pbx-manager && cd ~/pbx-manager
+#   curl -fsSLO https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/docker-compose.yml
+#   docker compose up -d
+#
+# Update:   docker compose pull && docker compose up -d
+# Settings: edit the defaults below, or put them in a .env file next to this one
+#           (.env.example in the repository lists them).
+#
+# Working from a checkout and want to run your own build instead? See
+# docker-compose.build.yml.
+
 services:
   pbx-manager:
-    # The published image, built by GitHub Actions from main for amd64 and arm64:
-    #   docker compose pull && docker compose up -d
-    # Or build from this checkout, which tags the result with the same name:
-    #   docker compose up -d --build
-    image: ghcr.io/spicy384/cisco-mpp-config-manager:latest
-    build: .
+    # Built by GitHub Actions for amd64 and arm64. "latest" follows the main branch;
+    # set PBX_VERSION (for example 1.0.3) to stay on a release until you choose to move.
+    image: ghcr.io/spicy384/cisco-mpp-config-manager:${PBX_VERSION:-latest}
     container_name: pbx-manager
     restart: unless-stopped
 

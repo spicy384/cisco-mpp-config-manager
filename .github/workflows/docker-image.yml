@@ -1,5 +1,5 @@
 # Builds the container image and publishes it to GitHub Container Registry, so a
-# management server can `docker compose pull` instead of building from source.
+# management server runs it with nothing but Docker and docker-compose.yml.
 #
 #   ghcr.io/spicy384/cisco-mpp-config-manager:latest   every push to main
 #   ghcr.io/spicy384/cisco-mpp-config-manager:1.2.3    a tag v1.2.3 (also :1.2)

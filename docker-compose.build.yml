@@ -1,0 +1,14 @@
+# Build the image from this checkout instead of pulling the published one.
+#
+# Only for working on the app itself; a server deploys with docker-compose.yml alone.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# The result is tagged with the same name the main file uses, so a later plain
+# "docker compose up -d" keeps running your build until "docker compose pull"
+# replaces it with the published image.
+
+services:
+  pbx-manager:
+    build:
+      context: .

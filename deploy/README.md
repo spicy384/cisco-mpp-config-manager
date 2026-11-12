@@ -3,6 +3,11 @@
 Pick the one that matches where your reverse proxy lives. Each directory is a
 self-contained Compose project with its own `.env.example`.
 
+**None of them needs the source.** They all run the image published at
+`ghcr.io/spicy384/cisco-mpp-config-manager`, so a server only needs Docker and the
+handful of files shown below, fetched with `curl`. Cloning the repository works too,
+but nothing is built from it.
+
 | Setup | Use when | HTTPS handled by |
 |---|---|---|
 | [`../docker-compose.yml`](../docker-compose.yml) | Simplest. You reach it on the server itself, or over an SSH tunnel | Nothing - plain HTTP on loopback |
@@ -11,6 +16,9 @@ self-contained Compose project with its own `.env.example`.
 
 All three run the same image. The differences are only in what is exposed and who
 terminates TLS.
+
+To update any of them: `docker compose pull && docker compose up -d`. To stay on a
+release instead of following `latest`, set `PBX_VERSION=1.0.3` (or whichever) in `.env`.
 
 ---
 
@@ -21,10 +29,15 @@ internal Docker network. **The app publishes no ports**, so the only route in is
 through Caddy over HTTPS.
 
 ```bash
-cd deploy/caddy
-cp .env.example .env      # set PBX_DOMAIN and ACME_EMAIL
+mkdir -p ~/pbx-manager && cd ~/pbx-manager
+curl -fsSLO https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/caddy/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/caddy/Caddyfile
+curl -fsSL  https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/caddy/.env.example -o .env
+nano .env                 # set PBX_DOMAIN and ACME_EMAIL
 docker compose up -d
 ```
+
+(From a clone: `cd deploy/caddy && cp .env.example .env`, edit, `docker compose up -d`.)
 
 Needs a real domain pointing at this host and inbound TCP 80 and 443. Caddy uses
 80 for the ACME challenge and for redirecting HTTP to HTTPS.
@@ -56,10 +69,14 @@ The app serves HTTPS itself with a self-signed certificate to keep that hop
 encrypted - otherwise sign-ins and session cookies would be readable in transit.
 
 ```bash
-cd deploy/external-proxy
-cp .env.example .env      # set BIND_IP and TLS_HOSTS
+mkdir -p ~/pbx-manager && cd ~/pbx-manager
+curl -fsSLO https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/external-proxy/docker-compose.yml
+curl -fsSL  https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/deploy/external-proxy/.env.example -o .env
+nano .env                 # set BIND_IP and TLS_HOSTS
 docker compose up -d
 ```
+
+(From a clone: `cd deploy/external-proxy && cp .env.example .env`, edit, `docker compose up -d`.)
 
 Then in the proxy:
 
@@ -76,6 +93,21 @@ Two things to get right:
    not cover it.
 2. Firewall port 3000 so only the proxy's address can reach it. Binding to a single
    LAN IP is a start, not a substitute.
+
+---
+
+## Running your own build
+
+Only needed when you are changing the app. From the repository root, build the image
+under the name the compose files use, then start whichever setup you like; it runs your
+build until the next `docker compose pull`:
+
+```bash
+docker build -t ghcr.io/spicy384/cisco-mpp-config-manager:latest .
+```
+
+For the root compose file there is also an override that does it in one step:
+`docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`.
 
 ---
 

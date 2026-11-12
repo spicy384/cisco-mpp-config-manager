@@ -462,14 +462,20 @@ the default. The extension is checked before it is inserted - only letters, digi
 
 ## Running in Docker
 
+The image is published at `ghcr.io/spicy384/cisco-mpp-config-manager`, so a server needs
+Docker and one file. There is nothing to clone or build:
+
 ```bash
-docker compose up -d --build
+mkdir -p ~/pbx-manager && cd ~/pbx-manager
+curl -fsSLO https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/docker-compose.yml
+docker compose up -d
 ```
 
 Then browse to <http://localhost:3000> **on the management server itself**.
 
-That root compose file is the simple case: plain HTTP on loopback, reached on the server or
-through an SSH tunnel. [`deploy/`](deploy) has ready-made alternatives:
+That compose file is the simple case: plain HTTP on loopback, reached on the server or
+through an SSH tunnel. [`deploy/`](deploy) has ready-made alternatives, each fetched the
+same way (its README has the exact commands):
 
 | Setup | Use when | HTTPS handled by |
 |---|---|---|
@@ -545,35 +551,40 @@ The container logs which template it resolved at startup, so check `docker compo
 | `PROXY_USER_HEADER` | `remote-user` | Which header carries the username in that mode |
 
 ### Updating
-Either pull the published image:
 
 ```bash
 docker compose pull && docker compose up -d
 ```
 
-or, after a `git pull`, build from source:
-
-```bash
-docker compose up -d --build
-```
-
-The volume is untouched either way, so your servers, accounts and change log carry over.
+The volume is untouched, so your servers, accounts and change log carry over. The compose
+file itself rarely changes; when a release note says it has, fetch it again with the
+`curl` line above (your settings live in `.env`, so nothing is lost).
 
 ### The published image
 Every push to `main` builds `ghcr.io/spicy384/cisco-mpp-config-manager:latest` for
 amd64 and arm64 through GitHub Actions; a tag such as `v1.2.0` also publishes `:1.2.0`
-and `:1.2`, and every build is reachable as `:sha-<commit>`. The compose file names this
-image, so a management server needs nothing but Docker and the compose file:
+and `:1.2`, and every build is reachable as `:sha-<commit>`. The package is public, so
+pulling needs no sign-in.
+
+By default the compose files follow `latest`. To stay on a release until you choose to
+move, put its number in a `.env` file next to the compose file:
 
 ```bash
-mkdir -p ~/pbx-manager && cd ~/pbx-manager
-curl -fsSLO https://raw.githubusercontent.com/spicy384/cisco-mpp-config-manager/main/docker-compose.yml
+echo "PBX_VERSION=1.0.3" >> .env
 docker compose up -d
 ```
 
-To pin a version rather than follow `latest`, change the tag in the compose file. Pulling
-needs no sign-in once the package is public; until then, `docker login ghcr.io` with a
-GitHub token that has `read:packages`.
+[`.env.example`](.env.example) lists the other settings that can go there.
+
+### Building it yourself
+Only needed when you are changing the app. From a clone:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+That builds the image from the checkout under the same name, so it keeps running until
+`docker compose pull` replaces it with the published one.
 
 ## Versions and updates
 

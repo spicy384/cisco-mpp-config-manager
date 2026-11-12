@@ -19,6 +19,14 @@ permissions:
   contents: read
   packages: write
 
+# One run per branch or tag at a time, in the order they were pushed. Without this two
+# quick pushes build side by side and whichever finishes last owns :latest, which can be
+# the older commit. A run that has started is never cancelled; when several are waiting
+# behind it, GitHub keeps only the newest of them, which is the one that should win.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Each platform builds natively on its own runner (GitHub's free arm64 runners
   # for public repositories replace QEMU emulation, which was slow and crashed

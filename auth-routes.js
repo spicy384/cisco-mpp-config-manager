@@ -29,6 +29,11 @@ const SESSION_COOKIE = "pbx_session";
 const RP_NAME = "PBX MPP Config Manager";
 const PASSKEY_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const MAX_PASSKEYS_PER_USER = 10;
+// Sign-in challenges are handed out before anyone has proved anything, so the number
+// held at once is capped; beyond it the oldest is dropped (its sign-in simply restarts).
+const MAX_PASSKEY_CHALLENGES = 1000;
+// Likewise the half-finished sign-ins waiting for a second factor.
+const MAX_PENDING_LOGINS = 1000;
 
 // Passkeys are bound to a domain (the relying party ID). Normally both come from
 // the Origin header of the browser's request; these override them for setups where
@@ -45,6 +50,9 @@ const PENDING_LOGIN_TTL_MS = 5 * 60 * 1000;      // window to enter an MFA code
 // Brute-force protection.
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
+// Names that are not accounts are counted and locked in memory exactly like real ones,
+// so a lock does not tell a guesser which usernames exist. This many are remembered.
+const MAX_UNKNOWN_USERNAMES = 10000;
 
 // Methods that change state require a CSRF token.
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -52,7 +60,7 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 // admin: everything. user: edits phones. viewer: read-only.
 const ROLES = new Set(["admin", "user", "viewer"]);
 
-function createAuth({ dataDir }) {
+function createAuth({ dataDir, servesTls = false }) {
   const USERS_FILE = path.join(dataDir, "users.json");
   const SESSIONS_FILE = path.join(dataDir, "sessions.json");
 
@@ -62,8 +70,11 @@ function createAuth({ dataDir }) {
 
   // Set this whenever HTTPS terminates in front of the app (a reverse proxy counts).
   // Deliberately not tied to NODE_ENV: a flag that silently does nothing is worse
-  // than one that is simply off.
-  const cookieSecure = String(process.env.COOKIE_SECURE || "").toLowerCase() === "true";
+  // than one that is simply off. Left unset, the cookie is Secure exactly when the app
+  // serves HTTPS itself, since it then knows every request arrived over TLS; an explicit
+  // COOKIE_SECURE=true or =false always wins.
+  const cookieSecureSetting = String(process.env.COOKIE_SECURE || "").trim().toLowerCase();
+  const cookieSecure = cookieSecureSetting === "true" || (cookieSecureSetting === "" && Boolean(servesTls));
 
   // Pending logins live in memory only: they are short-lived by design.
   const pendingLogins = new Map();
@@ -252,6 +263,40 @@ function createAuth({ dataDir }) {
     }
   }
 
+  // The same counting for names that are not accounts: lower-cased name ->
+  // { failedAttempts, lockedUntil }, in memory, oldest forgotten beyond the cap.
+  const unknownUsernames = new Map();
+
+  function unknownKey(username) {
+    return String(username || "").trim().toLowerCase().slice(0, 128);
+  }
+
+  function unknownLockedUntil(username) {
+    const entry = unknownUsernames.get(unknownKey(username));
+    return entry && entry.lockedUntil && Date.now() < entry.lockedUntil ? entry.lockedUntil : 0;
+  }
+
+  function registerUnknownFailure(username) {
+    const key = unknownKey(username);
+    const entry = unknownUsernames.get(key) || { failedAttempts: 0, lockedUntil: null };
+    entry.failedAttempts += 1;
+    if (entry.failedAttempts >= MAX_FAILED_ATTEMPTS) {
+      entry.lockedUntil = Date.now() + LOCKOUT_MS;
+      entry.failedAttempts = 0;
+    }
+    // Re-inserted so the map stays ordered by last attempt and the cap drops the stalest.
+    unknownUsernames.delete(key);
+    unknownUsernames.set(key, entry);
+    while (unknownUsernames.size > MAX_UNKNOWN_USERNAMES) {
+      unknownUsernames.delete(unknownUsernames.keys().next().value);
+    }
+  }
+
+  function lockedResponse(res, lockedUntil) {
+    const mins = Math.max(1, Math.ceil((lockedUntil - Date.now()) / 60000));
+    return res.status(429).json({ error: `Too many failed attempts. Try again in ${mins} minute(s).` });
+  }
+
   // --- identity resolution -------------------------------------------------
 
   // Per-account settings for the interface. Unknown keys and values are dropped.
@@ -286,8 +331,17 @@ function createAuth({ dataDir }) {
   const passkeyChallenges = new Map();
 
   function rememberChallenge(key, challenge) {
-    for (const [k, v] of passkeyChallenges) if (Date.now() > v.expiresAt) passkeyChallenges.delete(k);
+    // Every challenge lives equally long and the map is in insertion order, so the
+    // expired ones are all at the front: stop at the first that is still good.
+    for (const [k, v] of passkeyChallenges) {
+      if (Date.now() <= v.expiresAt) break;
+      passkeyChallenges.delete(k);
+    }
+    passkeyChallenges.delete(key);
     passkeyChallenges.set(key, { challenge, expiresAt: Date.now() + PASSKEY_CHALLENGE_TTL_MS });
+    while (passkeyChallenges.size > MAX_PASSKEY_CHALLENGES) {
+      passkeyChallenges.delete(passkeyChallenges.keys().next().value);
+    }
   }
 
   function takeChallenge(key) {
@@ -480,29 +534,36 @@ function createAuth({ dataDir }) {
     // Same response whether the user exists or not, so usernames cannot be probed.
     const invalid = () => res.status(401).json({ error: "Incorrect username or password." });
 
+    // The lock is consulted before the password, and answers the same whatever the
+    // password is. Checking the password first would let someone keep guessing through
+    // a lock and learn they had the right one from the different answer. Nothing more
+    // is counted while locked, so the lock ends when it said it would. A name that is
+    // not an account is counted and locked the same way, so the lock gives nothing away.
     if (!user) {
+      const lockedUntil = unknownLockedUntil(username);
+      if (lockedUntil) {
+        return lockedResponse(res, lockedUntil);
+      }
       // Spend comparable time so timing does not reveal existence.
       auth.verifyPassword(password, "scrypt$16384$8$1$00$00");
-      return invalid();
-    }
-
-    // The password is checked before the lockout is mentioned, so a locked account with a
-    // wrong password answers exactly like an unknown username.
-    if (!auth.verifyPassword(password, user.passwordHash)) {
-      if (!isLockedOut(user)) registerFailure(user);
+      registerUnknownFailure(username);
       return invalid();
     }
 
     if (isLockedOut(user)) {
-      const mins = Math.ceil((user.lockedUntil - Date.now()) / 60000);
-      return res.status(429).json({ error: `Too many failed attempts. Try again in ${mins} minute(s).` });
+      return lockedResponse(res, user.lockedUntil);
+    }
+
+    if (!auth.verifyPassword(password, user.passwordHash)) {
+      registerFailure(user);
+      return invalid();
     }
 
     clearFailures(user);
 
     if (user.mfaEnrolled && user.totpSecret) {
       const pendingToken = auth.randomToken(24);
-      pendingLogins.set(pendingToken, { userId: user.id, expiresAt: Date.now() + PENDING_LOGIN_TTL_MS });
+      rememberPendingLogin(pendingToken, user.id);
       return res.json({ ok: true, mfaRequired: true, pendingToken });
     }
 
@@ -517,6 +578,19 @@ function createAuth({ dataDir }) {
       mfaSetupRequired: !user.mfaEnrolled
     });
   });
+
+  /** Notes a password-verified sign-in awaiting its second factor, dropping stale and surplus ones. */
+  function rememberPendingLogin(token, userId) {
+    // Same lifetime for all and insertion-ordered, so the expired ones are at the front.
+    for (const [k, v] of pendingLogins) {
+      if (Date.now() <= v.expiresAt) break;
+      pendingLogins.delete(k);
+    }
+    pendingLogins.set(token, { userId, expiresAt: Date.now() + PENDING_LOGIN_TTL_MS });
+    while (pendingLogins.size > MAX_PENDING_LOGINS) {
+      pendingLogins.delete(pendingLogins.keys().next().value);
+    }
+  }
 
   function consumePending(token) {
     const pending = pendingLogins.get(token);
@@ -761,8 +835,44 @@ function createAuth({ dataDir }) {
     return res.json({ ok: true });
   });
 
-  /** Begins TOTP enrolment; nothing is stored until the code is confirmed. */
+  /**
+   * Begins TOTP enrolment; nothing is stored until the code is confirmed.
+   *
+   * Replacing an authenticator that is already enrolled needs the account password or
+   * a current code from it ({ password } or { code } in the body). Otherwise whoever
+   * gets hold of a signed-in browser could swap in their own second factor without
+   * knowing either. First-time enrolment needs nothing extra.
+   */
   router.post("/api/auth/mfa/setup", requireAuth, async (req, res) => {
+    const account = findUserById(req.user.id);
+    if (account && account.mfaEnrolled && account.totpSecret) {
+      const password = req.body?.password;
+      const code = req.body?.code;
+      if (!password && !code) {
+        return res.status(400).json({
+          error: "Two-factor is already set up. Enter your password or a current authenticator code to replace it.",
+          reauthRequired: true
+        });
+      }
+      if (isLockedOut(account)) {
+        return lockedResponse(res, account.lockedUntil);
+      }
+      if (password) {
+        if (!auth.verifyPassword(password, account.passwordHash)) {
+          registerFailure(account);
+          return res.status(401).json({ error: "Password is incorrect.", reauthRequired: true });
+        }
+      } else {
+        const counter = auth.verifyTotp(account.totpSecret, code);
+        if (counter === null || counter <= (account.lastTotpCounter || 0)) {
+          registerFailure(account);
+          return res.status(401).json({ error: "Incorrect authentication code.", reauthRequired: true });
+        }
+        updateUser(account.id, { lastTotpCounter: counter });
+      }
+      clearFailures(account);
+    }
+
     const secret = auth.generateTotpSecret();
     const uri = auth.buildOtpauthUri({ secret, account: req.user.username });
 

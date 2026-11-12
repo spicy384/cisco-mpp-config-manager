@@ -1,13 +1,31 @@
 const crypto = require("crypto");
-const fs = require("fs");
 const path = require("path");
+
+const { readJsonFile, writeJsonFile } = require("./json-store");
 
 /**
  * SSH host key store using trust-on-first-use, the same model as OpenSSH's
  * known_hosts: the first connection to a host records its key fingerprint, and
  * every later connection must present the same key or it is refused before the
  * password is sent.
+ *
+ * The store is read strictly: a known-hosts.json that exists but cannot be parsed
+ * refuses every connection until it is repaired. Reading it as "nothing known yet"
+ * would quietly accept whatever key each host presents next, which is exactly the
+ * moment an intercepted connection needs.
  */
+
+class HostKeyStoreError extends Error {
+  constructor(cause) {
+    super(
+      "The remembered SSH host keys (known-hosts.json) cannot be read, so no PBX connection is "
+        + `made until that file is repaired or restored: ${cause && cause.message ? cause.message : cause}`
+    );
+    this.name = "HostKeyStoreError";
+    this.code = "HOST_KEY_STORE_UNREADABLE";
+    this.status = 503;
+  }
+}
 
 class HostKeyMismatchError extends Error {
   constructor({ host, port, expected, actual }) {
@@ -38,18 +56,29 @@ function hostKeyId(host, port) {
 function createHostKeyStore({ dataDir }) {
   const file = path.join(dataDir, "known-hosts.json");
 
+  /** Every remembered key. A missing file is an empty store; an unreadable one throws. */
   function load() {
+    let parsed;
     try {
-      const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-    } catch {
-      return {};
+      parsed = readJsonFile(file, {});
+    } catch (error) {
+      throw new HostKeyStoreError(error);
     }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new HostKeyStoreError(new Error("it does not hold an object keyed by host:port"));
+    }
+    return parsed;
   }
 
+  // Atomic (json-store.js), so a crash or a full disk mid-write cannot leave a
+  // truncated file behind.
   function save(map) {
-    fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(map, null, 2), "utf8");
+    writeJsonFile(file, map);
+  }
+
+  /** Throws a HostKeyStoreError when the store cannot be read; callers check before dialling. */
+  function assertReadable() {
+    load();
   }
 
   function list() {
@@ -76,32 +105,42 @@ function createHostKeyStore({ dataDir }) {
    */
   function verifierFor(host, port) {
     const id = hostKeyId(host, port);
-    const outcome = { status: null, fingerprint: null, expected: null };
+    const outcome = { status: null, fingerprint: null, expected: null, error: null };
 
     const verifier = (keyBuffer) => {
       const actual = fingerprintOf(keyBuffer);
-      const map = load();
-      const known = map[id];
-      const now = new Date().toISOString();
       outcome.fingerprint = actual;
 
-      if (!known) {
-        map[id] = { fingerprint: actual, firstSeen: now, lastSeen: now };
-        save(map);
-        outcome.status = "new";
-        return true;
-      }
+      // This runs inside the SSH handshake, where a throw would surface as an opaque
+      // protocol error. A store that cannot be read or written refuses the key instead,
+      // and the caller reports why from the outcome.
+      try {
+        const map = load();
+        const known = Object.prototype.hasOwnProperty.call(map, id) ? map[id] : null;
+        const now = new Date().toISOString();
 
-      if (known.fingerprint === actual) {
-        map[id] = { ...known, lastSeen: now };
-        save(map);
-        outcome.status = "known";
-        return true;
-      }
+        if (!known) {
+          map[id] = { fingerprint: actual, firstSeen: now, lastSeen: now };
+          save(map);
+          outcome.status = "new";
+          return true;
+        }
 
-      outcome.status = "mismatch";
-      outcome.expected = known.fingerprint;
-      return false;
+        if (known.fingerprint === actual) {
+          map[id] = { ...known, lastSeen: now };
+          save(map);
+          outcome.status = "known";
+          return true;
+        }
+
+        outcome.status = "mismatch";
+        outcome.expected = known.fingerprint;
+        return false;
+      } catch (error) {
+        outcome.status = "error";
+        outcome.error = error instanceof HostKeyStoreError ? error : new HostKeyStoreError(error);
+        return false;
+      }
     };
 
     return { verifier, outcome };
@@ -116,7 +155,7 @@ function createHostKeyStore({ dataDir }) {
     });
   }
 
-  return { file, list, get, forget, verifierFor, mismatchError };
+  return { file, list, get, forget, verifierFor, mismatchError, assertReadable };
 }
 
-module.exports = { createHostKeyStore, fingerprintOf, hostKeyId, HostKeyMismatchError };
+module.exports = { createHostKeyStore, fingerprintOf, hostKeyId, HostKeyMismatchError, HostKeyStoreError };

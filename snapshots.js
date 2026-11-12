@@ -2,6 +2,8 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
+const { readJsonFile, writeJsonFile, forget } = require("./json-store");
+
 /**
  * Keeps a copy of every phone config as it was just before this app overwrote it,
  * so any change made here can be undone. Copies are stored per PBX (by change-log
@@ -38,17 +40,16 @@ function createSnapshotStore({ dataDir, keep = DEFAULT_KEEP }) {
     return path.join(root, scopeDirName(scopeKey), assertSafeFileName(fileName));
   }
 
+  // The index is read strictly and written atomically (json-store.js). An index that
+  // exists but cannot be parsed throws, which stops the write that asked for a copy:
+  // treating it as "no versions yet" would orphan every version it listed.
   function readIndex(dir) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(dir, "index.json"), "utf8"));
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
+    const parsed = readJsonFile(path.join(dir, "index.json"), []);
+    return Array.isArray(parsed) ? parsed : [];
   }
 
   function writeIndex(dir, index) {
-    fs.writeFileSync(path.join(dir, "index.json"), JSON.stringify(index, null, 2), "utf8");
+    writeJsonFile(path.join(dir, "index.json"), index);
   }
 
   /**
@@ -160,6 +161,7 @@ function createSnapshotStore({ dataDir, keep = DEFAULT_KEEP }) {
     }
 
     fs.rmSync(fromDir, { recursive: true, force: true });
+    forget(path.join(fromDir, "index.json"));
     return moved.length;
   }
 

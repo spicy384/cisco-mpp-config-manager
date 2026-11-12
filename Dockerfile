@@ -34,8 +34,10 @@ COPY examples ./examples
 RUN node -e "require('./server.js')"
 
 # The image ships no data; /data is a volume that outlives the container.
-# node:alpine already provides an unprivileged `node` user (uid 1000).
-RUN mkdir -p /data && chown -R node:node /data /app
+# node:alpine already provides an unprivileged `node` user (uid 1000). Only /data is
+# handed to it: the code in /app stays root-owned, so the running app cannot rewrite
+# itself or the scripts it serves to browsers.
+RUN mkdir -p /data && chown -R node:node /data
 
 USER node
 EXPOSE 3000

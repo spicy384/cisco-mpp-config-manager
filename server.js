@@ -49,17 +49,61 @@ const MAX_LOG_ENTRIES_PER_SCOPE = 2000;
 // list of addresses/CIDRs/"loopback"/"uniquelocal".
 const TRUST_PROXY = process.env.TRUST_PROXY === undefined || process.env.TRUST_PROXY === "" ? "loopback, uniquelocal" : process.env.TRUST_PROXY;
 app.set("trust proxy", /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY === "false" ? false : TRUST_PROXY === "true" ? true : TRUST_PROXY);
+app.disable("x-powered-by");
 
-app.use(express.json({ limit: "1mb" }));
-
+const vm = require("vm");
 const { createAuth } = require("./auth-routes");
 const { resolveTlsOptions } = require("./tls-setup");
 const { quickSchema, normalizeModelChoice } = require("./public/quick-config");
 const { macToFileName } = require("./public/csv-rows");
-const authGuard = createAuth({ dataDir: DATA_DIR });
+// Whether this process serves HTTPS itself, by the same test tls-setup.js applies at
+// boot (which exits if TLS was asked for and cannot be set up). Known this early so
+// the session cookie and the headers below can depend on it.
+const SERVES_TLS = String(process.env.TLS_ENABLED || "").toLowerCase() === "true"
+  || Boolean(String(process.env.TLS_CERT || "").trim() || String(process.env.TLS_KEY || "").trim());
+const authGuard = createAuth({ dataDir: DATA_DIR, servesTls: SERVES_TLS });
 const { readJsonFile, writeJsonFile } = require("./json-store");
 const { createUpdateChecker } = require("./version");
 const pkg = require("./package.json");
+
+// Sent with every response, the page and the API alike. The policy is what the page
+// actually loads: its own scripts and stylesheet, inline style attributes, and the
+// data: URI of the two-factor QR code. Nothing may frame it.
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "base-uri 'none'",
+  "form-action 'self'"
+].join("; ");
+// Everything off except what the page uses: passkeys and copying to the clipboard.
+const PERMISSIONS_POLICY = [
+  "accelerometer=()", "camera=()", "geolocation=()", "gyroscope=()", "magnetometer=()",
+  "microphone=()", "payment=()", "usb=()",
+  "publickey-credentials-get=(self)", "publickey-credentials-create=(self)", "clipboard-write=(self)"
+].join(", ");
+// Only promised when the browser is known to reach this app over HTTPS: it serves TLS
+// itself, or the operator has said so with COOKIE_SECURE=true. Sent over plain HTTP it
+// would be ignored anyway, but there is no call to claim it.
+const SEND_HSTS = SERVES_TLS || authGuard.cookieSecure;
+
+app.use((req, res, next) => {
+  res.setHeader("Content-Security-Policy", CONTENT_SECURITY_POLICY);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "same-origin");
+  res.setHeader("Permissions-Policy", PERMISSIONS_POLICY);
+  if (SEND_HSTS) {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000");
+  }
+  next();
+});
+
+app.use(express.json({ limit: "1mb" }));
 
 // The page, with its scripts and stylesheet addressed by version (/app.js?v=1.0.0), so
 // neither a browser nor a caching proxy in front (Nginx Proxy Manager's "Cache Assets"
@@ -76,9 +120,29 @@ app.get(["/", "/index.html"], (req, res) => {
   res.setHeader("Cache-Control", "no-cache");
   res.send(INDEX_HTML);
 });
+// A script or stylesheet asked for by another release's version (a tab left open across
+// an upgrade, or a proxy that kept the old page) is sent on to this release's address
+// instead of being served under a name that would then be cached as the old one. The
+// target is rebuilt from the path alone, with any leading slashes or backslashes
+// reduced to one slash, so "//elsewhere.example/x.js" cannot turn this into a redirect
+// off the site.
+app.use((req, res, next) => {
+  if ((req.method !== "GET" && req.method !== "HEAD") || !/\.(?:js|css)$/i.test(req.path) || /^\/api(?:\/|$)/i.test(req.path)) {
+    return next();
+  }
+  const asked = req.query.v;
+  if (asked === undefined || asked === pkg.version) {
+    return next();
+  }
+  res.setHeader("Cache-Control", "no-store");
+  return res.redirect(302, `/${req.path.replace(/^[/\\]+/, "")}?v=${encodeURIComponent(pkg.version)}`);
+});
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/api", (req, res, next) => {
   res.setHeader("X-App-Version", pkg.version);
+  // Every answer describes the PBX or the account as it is now; none may be replayed
+  // from a cache, the browser's or a proxy's.
+  res.setHeader("Cache-Control", "no-store");
   next();
 });
 
@@ -153,22 +217,43 @@ const {
 // --- audit rules -------------------------------------------------------------------
 // Matched against every request before it is routed; see audit-log.js for the shape.
 const userNameById = (id) => (authGuard.loadUsers().find((u) => u.id === id) || {}).username || id;
-const idFromPath = (req, pattern) => decodeURIComponent((pattern.exec(req.path) || [])[1] || "");
+// The id a rule's pattern captured. The audit middleware does the matching (without
+// regard to case or a trailing slash, as Express routes) and leaves it on the request.
+const idFromPath = (req) => {
+  const raw = (req.auditMatch || [])[1] || "";
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+};
 const attemptedUser = (req, res, body) => ({ user: (body && body.user && body.user.username) || req.auditUser || String(req.body?.username || "").trim() });
+// A request the sign-in throttle turned away. The attempts that earned the block are
+// already in the log; a line for each refusal would let anyone bury everything else.
+const throttled = (req) => req.rateLimited === true;
+// Repeats of the same failed sign-in (same address, name and reason) add one line a
+// minute, for the same reason.
+const SIGN_IN_COALESCE_MS = 60 * 1000;
+// What a profile runs on the PBX, for the audit trail of who set it.
+const describeProfileCommands = (body) => {
+  const resync = String(body?.resyncCommand == null ? "" : body.resyncCommand).trim();
+  const status = String(body?.statusCommand == null ? "" : body.statusCommand).trim();
+  return `resync command: ${resync || "(default)"}; status command: ${status || "(default)"}`;
+};
 
 const AUDIT_RULES = [
-  { method: "POST", path: /^\/api\/auth\/setup$/, action: "setup", public: true,
+  { method: "POST", path: /^\/api\/auth\/setup$/, action: "setup", public: true, skip: throttled,
     describe: (req) => ({ user: String(req.body?.username || "").trim(), detail: "first administrator created" }) },
-  { method: "POST", path: /^\/api\/auth\/login$/, action: "sign-in", public: true,
+  { method: "POST", path: /^\/api\/auth\/login$/, action: "sign-in", public: true, skip: throttled, coalesceFailuresMs: SIGN_IN_COALESCE_MS,
     describe: (req, res, body) => ({
       ...attemptedUser(req, res, body),
       detail: res.statusCode < 400 ? (body && body.mfaRequired ? "password accepted, second factor required" : "password") : undefined
     }) },
-  { method: "POST", path: /^\/api\/auth\/login\/mfa$/, action: "sign-in", public: true,
+  { method: "POST", path: /^\/api\/auth\/login\/mfa$/, action: "sign-in", public: true, skip: throttled, coalesceFailuresMs: SIGN_IN_COALESCE_MS,
     describe: (req, res, body) => ({ ...attemptedUser(req, res, body), detail: res.statusCode < 400 ? "authenticator code" : undefined }) },
-  { method: "POST", path: /^\/api\/auth\/login\/recovery$/, action: "sign-in", public: true,
+  { method: "POST", path: /^\/api\/auth\/login\/recovery$/, action: "sign-in", public: true, skip: throttled, coalesceFailuresMs: SIGN_IN_COALESCE_MS,
     describe: (req, res, body) => ({ ...attemptedUser(req, res, body), detail: res.statusCode < 400 ? "recovery code" : undefined }) },
-  { method: "POST", path: /^\/api\/auth\/passkeys\/login\/verify$/, action: "sign-in", public: true,
+  { method: "POST", path: /^\/api\/auth\/passkeys\/login\/verify$/, action: "sign-in", public: true, skip: throttled, coalesceFailuresMs: SIGN_IN_COALESCE_MS,
     describe: (req, res, body) => ({ ...attemptedUser(req, res, body), detail: res.statusCode < 400 ? "passkey" : undefined }) },
   { method: "POST", path: /^\/api\/auth\/logout$/, action: "sign-out" },
   { method: "POST", path: /^\/api\/auth\/password$/, action: "password-changed" },
@@ -181,11 +266,11 @@ const AUDIT_RULES = [
   { method: "POST", path: /^\/api\/users$/, action: "user-created",
     describe: (req, res, body) => ({ target: String(req.body?.username || "").trim(), detail: body && body.user ? `role ${body.user.role}` : undefined }) },
   { method: "DELETE", path: /^\/api\/users\/([^/]+)$/, action: "user-deleted",
-    prepare: (req) => ({ target: userNameById(idFromPath(req, /^\/api\/users\/([^/]+)$/)) }),
+    prepare: (req) => ({ target: userNameById(idFromPath(req)) }),
     describe: (req) => ({ target: req.auditContext.target }) },
   { method: "POST", path: /^\/api\/users\/([^/]+)\/role$/, action: "role-changed",
     prepare: (req) => {
-      const id = idFromPath(req, /^\/api\/users\/([^/]+)\/role$/);
+      const id = idFromPath(req);
       const user = authGuard.loadUsers().find((u) => u.id === id);
       return { target: user ? user.username : id, from: user ? user.role : "" };
     },
@@ -194,14 +279,19 @@ const AUDIT_RULES = [
       detail: res.statusCode < 400 ? `${req.auditContext.from} -> ${String(req.body?.role || "")}` : undefined
     }) },
   { method: "POST", path: /^\/api\/users\/([^/]+)\/reset-mfa$/, action: "mfa-reset",
-    prepare: (req) => ({ target: userNameById(idFromPath(req, /^\/api\/users\/([^/]+)\/reset-mfa$/)) }),
+    prepare: (req) => ({ target: userNameById(idFromPath(req)) }),
     describe: (req) => ({ target: req.auditContext.target }) },
 
+  // The commands are part of the record: they are what the app will run on that PBX.
   { method: "POST", path: /^\/api\/servers$/, action: "server-saved",
-    describe: (req) => ({ target: `${String(req.body?.name || "").trim()} (${String(req.body?.host || "").trim()})` }) },
+    describe: (req, res) => ({
+      target: `${String(req.body?.name || "").trim()} (${String(req.body?.host || "").trim()})`,
+      detail: res.statusCode < 400 ? describeProfileCommands(req.body) : undefined,
+      detailLimit: 1200
+    }) },
   { method: "DELETE", path: /^\/api\/servers\/([^/]+)$/, action: "server-deleted",
     prepare: (req) => {
-      const id = idFromPath(req, /^\/api\/servers\/([^/]+)$/);
+      const id = idFromPath(req);
       const server = loadServers().find((s) => s.id === id);
       return { target: server ? `${server.name} (${server.host})` : id };
     },
@@ -212,8 +302,13 @@ const AUDIT_RULES = [
   { method: "POST", path: /^\/api\/connect$/, action: "pbx-connect",
     describe: (req, res, body) => {
       const conn = body && body.connection;
-      const profile = req.body?.profileId ? loadServers().find((s) => s.id === String(req.body.profileId)) : null;
-      const target = conn ? (conn.profileName || conn.host) : (profile ? profile.name : String(req.body?.host || "").trim());
+      let profile = null;
+      try {
+        profile = req.body?.profileId ? loadServers().find((s) => s.id === String(req.body.profileId)) : null;
+      } catch {
+        // The saved servers could not be read; the attempt is still recorded, by id.
+      }
+      const target = conn ? (conn.profileName || conn.host) : (profile ? profile.name : String(req.body?.host || req.body?.profileId || "").trim());
       return { target, detail: conn ? `${conn.username}@${conn.host}:${conn.port} ${conn.remoteDir}, ${conn.auth === "key" ? "SSH key" : "password"}` : undefined };
     } },
   { method: "DELETE", path: /^\/api\/connection$/, action: "pbx-disconnect",
@@ -221,6 +316,18 @@ const AUDIT_RULES = [
     skip: (req) => !req.auditTarget },
   { method: "POST", path: /^\/api\/connection\/select$/, action: "pbx-switch",
     describe: (req) => ({ target: req.auditTarget || String(req.body?.key || "") }) },
+  // Running a command on the PBX is an event whoever asked and whatever came of it.
+  { method: "POST", path: /^\/api\/resync\/test$/, action: "resync-test",
+    describe: (req, res, body) => {
+      const typed = String(req.body?.resyncCommand == null ? "" : req.body.resyncCommand).trim();
+      const ran = body && body.command ? `ran: ${body.command}` : (typed ? `asked to run: ${typed}` : "");
+      const failure = res.statusCode >= 400 && body && body.error ? `${body.error}${ran ? " - " : ""}` : "";
+      return {
+        target: req.auditTarget || "",
+        detail: `${failure}${ran}` || undefined,
+        detailLimit: 1200
+      };
+    } },
   { method: "POST", path: /^\/api\/ssh-key$/, action: "ssh-key-generated",
     describe: (req, res, body) => ({ target: body && body.fingerprint ? body.fingerprint : "", detail: res.statusCode < 400 && req.body?.replace === true ? "replaced the previous key" : undefined }) },
   { method: "DELETE", path: /^\/api\/ssh-key$/, action: "ssh-key-removed" },
@@ -229,7 +336,7 @@ const AUDIT_RULES = [
   { method: "POST", path: /^\/api\/known-hosts\/forget$/, action: "host-key-forgotten",
     describe: (req) => ({ target: `${String(req.body?.host || "").trim()}:${Number(req.body?.port) || 22}` }) },
   { method: "DELETE", path: /^\/api\/logs\/(.+)$/, action: "change-log-cleared",
-    describe: (req, res, body) => ({ target: idFromPath(req, /^\/api\/logs\/(.+)$/), detail: body && body.cleared !== undefined ? `${body.cleared} entries` : undefined }) }
+    describe: (req, res, body) => ({ target: idFromPath(req), detail: body && body.cleared !== undefined ? `${body.cleared} entries` : undefined }) }
 ];
 
 app.use(auditLog.middleware(AUDIT_RULES));
@@ -240,9 +347,42 @@ app.use(authGuard.router);
 // Everything else under /api requires a signed-in user.
 app.use("/api", authGuard.requireAuth);
 
+// Requests that choose a PBX, and so are not held to the one a tab was showing.
+const PBX_CHOOSING_ROUTES = /^\/(?:connect|connection\/select)\/?$/i;
+const PBX_CHANGED_MESSAGE = "This tab is showing a different PBX than the one your session is now connected to. Reload the page to continue.";
+
+/** The X-Pbx-Key a request carried, or undefined. Accepted as sent or URI-encoded, since a key may hold characters a header cannot. */
+function pbxKeyClaimedBy(req) {
+  const sent = req.headers["x-pbx-key"];
+  if (sent === undefined) {
+    return undefined;
+  }
+  const text = String(Array.isArray(sent) ? sent[0] : sent);
+  try {
+    return [text, decodeURIComponent(text)];
+  } catch {
+    return [text];
+  }
+}
+
 // From here on a request knows which PBX it is about (see "PBX connections" below).
 app.use("/api", (req, res, next) => {
-  pbxContext.run({ key: resolveActiveKey(sessionIdOf(req)) }, next);
+  const key = resolveActiveKey(sessionIdOf(req));
+
+  // A session is on one PBX however many tabs it has open. A tab still showing the
+  // PBX the session was on before says so with X-Pbx-Key on anything that changes
+  // state, and is refused rather than have its edit land on the other PBX.
+  if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" && !PBX_CHOOSING_ROUTES.test(req.path)) {
+    // A tab on a PBX whose connection was lost still names that PBX, or none at all
+    // once it has shown the connect form; both are let through to be told what happened.
+    const claimed = pbxKeyClaimedBy(req);
+    const live = Boolean(key && links.has(key));
+    if (claimed && !claimed.includes(key || "") && !(!live && claimed.includes(""))) {
+      return res.status(409).json({ error: PBX_CHANGED_MESSAGE, pbxChanged: true });
+    }
+  }
+
+  return pbxContext.run({ key }, next);
 });
 
 const parser = new XMLParser({
@@ -449,57 +589,58 @@ function sendError(res, error, fallbackStatus = 500) {
   return res.status((error && error.status) || fallbackStatus).json({ error: error.message });
 }
 
+// The stores below (saved servers, templates, the change log, phone models and the
+// listing cache) are read and written through json-store.js: writes go to a temporary
+// file and are renamed into place, so a crash or a full disk mid-write cannot leave a
+// truncated file, and a file that exists but cannot be parsed is an error (503) rather
+// than "empty". Reading a damaged file as empty is how the next save would quietly
+// replace every saved server, or the whole change history, with one new entry. A file
+// that does not exist yet is simply empty.
 function ensureDataStore() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
-
-  if (!fs.existsSync(SERVERS_FILE)) {
-    fs.writeFileSync(SERVERS_FILE, "[]", "utf8");
-  }
-
-  if (!fs.existsSync(FILE_CACHE_FILE)) {
-    fs.writeFileSync(FILE_CACHE_FILE, "{}", "utf8");
-  }
-
-  if (!fs.existsSync(TEMPLATES_FILE)) {
-    fs.writeFileSync(TEMPLATES_FILE, "[]", "utf8");
-  }
-
-  if (!fs.existsSync(CHANGE_LOG_FILE)) {
-    fs.writeFileSync(CHANGE_LOG_FILE, "{}", "utf8");
-  }
 }
 
+/**
+ * Loaded once at boot. This one is only a cache of what the PBX listing said, rebuilt
+ * from the PBX whenever an entry is missing, so a damaged file is passed over with a
+ * warning instead of stopping the app (and replaced at the next listing): there is
+ * nothing in it that cannot be read from the PBX again.
+ */
 function loadFileMetadataCache() {
   ensureDataStore();
+  fileMetadataCache.clear();
 
+  let parsed;
   try {
-    const raw = fs.readFileSync(FILE_CACHE_FILE, "utf8");
-    const parsed = JSON.parse(raw);
+    parsed = readJsonFile(FILE_CACHE_FILE, {});
+  } catch (error) {
+    console.warn(`Listing cache ignored and will be rebuilt: ${error.message}`);
+    return;
+  }
 
-    fileMetadataCache.clear();
-    for (const [key, value] of Object.entries(parsed || {})) {
-      if (!value || typeof value !== "object") {
-        continue;
-      }
-
-      fileMetadataCache.set(key, {
-        size: Number(value.size) || 0,
-        modified: Number(value.modified) || 0,
-        stationDisplayName: String(value.stationDisplayName || "")
-      });
+  for (const [key, value] of Object.entries(parsed && typeof parsed === "object" ? parsed : {})) {
+    if (!value || typeof value !== "object") {
+      continue;
     }
-  } catch {
-    fileMetadataCache.clear();
+
+    const entry = {
+      size: Number(value.size) || 0,
+      modified: Number(value.modified) || 0,
+      stationDisplayName: String(value.stationDisplayName || "")
+    };
+    // Absent on entries cached before extensions were tracked; those are re-read once.
+    if (value.extension !== undefined) {
+      entry.extension = String(value.extension || "");
+    }
+    fileMetadataCache.set(key, entry);
   }
 }
 
 function persistFileMetadataCache() {
   ensureDataStore();
-
-  const data = Object.fromEntries(fileMetadataCache.entries());
-  fs.writeFileSync(FILE_CACHE_FILE, JSON.stringify(data, null, 2), "utf8");
+  writeJsonFile(FILE_CACHE_FILE, Object.fromEntries(fileMetadataCache.entries()));
 }
 
 function setFileMetadataCacheEntry(key, value) {
@@ -517,20 +658,21 @@ function deleteFileMetadataCacheEntry(key) {
  * one history regardless of how many times you connect and disconnect.
  */
 function loadChangeLog() {
-  ensureDataStore();
-
-  try {
-    const raw = fs.readFileSync(CHANGE_LOG_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  const parsed = readJsonFile(CHANGE_LOG_FILE, {});
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
 }
 
 function saveChangeLog(log) {
-  ensureDataStore();
-  fs.writeFileSync(CHANGE_LOG_FILE, JSON.stringify(log, null, 2), "utf8");
+  writeJsonFile(CHANGE_LOG_FILE, log);
+}
+
+/**
+ * Called before a route changes anything on the PBX. The change is logged after it is
+ * made, so a change log that cannot be read is found out first: otherwise the phone's
+ * file would be written and only then the request fail, leaving no record of it.
+ */
+function ensureChangeLogReadable() {
+  loadChangeLog();
 }
 
 // Snapshot of who we are writing to, captured up-front so a later disconnect
@@ -608,35 +750,21 @@ function appendLogEntries(scope, entries, user = "") {
 }
 
 function loadServers() {
-  ensureDataStore();
-  try {
-    const raw = fs.readFileSync(SERVERS_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  const parsed = readJsonFile(SERVERS_FILE, []);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 function saveServers(servers) {
-  ensureDataStore();
-  fs.writeFileSync(SERVERS_FILE, JSON.stringify(servers, null, 2), "utf8");
+  writeJsonFile(SERVERS_FILE, servers);
 }
 
 function loadTemplates() {
-  ensureDataStore();
-  try {
-    const raw = fs.readFileSync(TEMPLATES_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  const parsed = readJsonFile(TEMPLATES_FILE, []);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 function saveTemplates(templates) {
-  ensureDataStore();
-  fs.writeFileSync(TEMPLATES_FILE, JSON.stringify(templates, null, 2), "utf8");
+  writeJsonFile(TEMPLATES_FILE, templates);
 }
 
 function getDefaultTemplate() {
@@ -710,6 +838,13 @@ function sanitizeServerProfile(input) {
   };
 }
 
+/** An error the caller got wrong, answered with 400 by sendError and the error middleware. */
+function badRequest(message, extra = {}) {
+  const error = new Error(message);
+  error.status = 400;
+  return Object.assign(error, extra);
+}
+
 function sanitizeFileName(fileName) {
   if (typeof fileName !== "string") {
     throw new Error("Invalid file name.");
@@ -727,23 +862,71 @@ function sanitizeFileName(fileName) {
   return clean;
 }
 
-function normalizeEntries(entries) {
+// Tag, attribute and root names are written into the file exactly as given (only
+// values are escaped), so a name from a request has to be one that cannot break out
+// of its place in the markup: "My Tag" or "a><b" would leave every phone it was
+// written to with a file that no longer parses.
+const XML_NAME = /^[A-Za-z_][\w.-]*$/;
+
+function assertXmlName(name, what) {
+  const text = String(name == null ? "" : name);
+  if (!XML_NAME.test(text)) {
+    const shown = text.length > 60 ? `${text.slice(0, 60)}...` : text;
+    throw badRequest(`${what} "${shown}" is not a valid name: use letters, digits, "_", "-" and ".", starting with a letter or "_".`);
+  }
+  return text;
+}
+
+/** Entries as the XML builder wants them. Names are taken as they are: see normalizeEntries. */
+function cleanEntries(entries) {
   if (!Array.isArray(entries)) {
-    throw new Error("Entries must be an array.");
+    throw badRequest("Entries must be an array.");
   }
 
   return entries
     .map((entry) => ({
-      key: String(entry.key || "").trim(),
-      value: entry.value == null ? "" : String(entry.value),
-      attributes: entry.attributes && typeof entry.attributes === "object" ? entry.attributes : {}
+      key: String((entry && entry.key) || "").trim(),
+      value: !entry || entry.value == null ? "" : String(entry.value),
+      attributes: entry && entry.attributes && typeof entry.attributes === "object" && !Array.isArray(entry.attributes) ? entry.attributes : {}
     }))
     .filter((entry) => entry.key.length > 0);
 }
 
+/**
+ * Entries from a request body: cleaned as above, and every tag and attribute name
+ * checked. Entries read from a file on the PBX do not come through here; their names
+ * were valid XML where they came from.
+ */
+function normalizeEntries(entries) {
+  return cleanEntries(entries).map((entry) => {
+    assertXmlName(entry.key, "Tag name");
+
+    const attributes = {};
+    for (const [name, value] of Object.entries(entry.attributes)) {
+      const clean = String(name).trim();
+      if (clean.length === 0) {
+        continue;
+      }
+      attributes[assertXmlName(clean, `Attribute name on ${entry.key}`)] = value;
+    }
+
+    return { ...entry, attributes };
+  });
+}
+
+/** The file's XML declaration (<?xml ... ?>) exactly as written, or "" when it has none. */
+function xmlDeclarationOf(xmlText) {
+  const match = /^\uFEFF?\s*(<\?xml\s[^>]*?\?>)/i.exec(String(xmlText == null ? "" : xmlText));
+  return match ? match[1] : "";
+}
+
 function xmlToEntries(xmlText) {
   const parsed = parser.parse(xmlText);
-  const rootKey = Object.keys(parsed)[0];
+  // The declaration and any other processing instruction are parsed as members named
+  // "?xml" and the like. Taking the first member as the root made a file that starts
+  // with <?xml version="1.0"?> look like one with two fields and no settings, and the
+  // next save wrote exactly that back.
+  const rootKey = Object.keys(parsed).find((key) => !key.startsWith("?"));
 
   if (!rootKey) {
     throw new Error("XML has no root node.");
@@ -823,8 +1006,12 @@ function findStationDisplayNameInEntries(entries) {
   const found = (entries || []).find((entry) => String(entry.key || "").trim() === "Station_Display_Name");
   return found ? String(found.value || "") : "";
 }
-function entriesToXml(rootKey, entries) {
-  const normalized = normalizeEntries(entries);
+/**
+ * Builds the file. Pass the source file's `declaration` (see xmlDeclarationOf) when
+ * rewriting one, so a file that began with <?xml ...?> still does.
+ */
+function entriesToXml(rootKey, entries, { declaration = "" } = {}) {
+  const normalized = cleanEntries(entries);
   const root = {};
 
   for (const entry of normalized) {
@@ -847,7 +1034,8 @@ function entriesToXml(rootKey, entries) {
     }
   }
 
-  return builder.build({ [rootKey]: root });
+  const body = builder.build({ [rootKey]: root });
+  return declaration ? `${declaration}\n${body}` : body;
 }
 
 const BULK_EDIT_MODES = new Set(["set", "update-existing", "delete"]);
@@ -859,7 +1047,7 @@ function normalizeAttributeOverride(input) {
   }
 
   if (typeof input !== "object" || Array.isArray(input)) {
-    throw new Error("Attributes must be a JSON object.");
+    throw badRequest("Attributes must be a JSON object.");
   }
 
   const out = {};
@@ -868,7 +1056,7 @@ function normalizeAttributeOverride(input) {
     if (clean.length === 0) {
       continue;
     }
-    out[clean] = value == null ? "" : String(value);
+    out[assertXmlName(clean, "Attribute name")] = value == null ? "" : String(value);
   }
 
   return out;
@@ -1098,6 +1286,41 @@ function lastLoggedWrite(scope, fileName) {
   return null;
 }
 
+// No phone config comes anywhere near this. The limit is there so that a wrong
+// directory, or a server that is not the PBX it claims to be, cannot make the app
+// read gigabytes into memory.
+const MAX_REMOTE_FILE_BYTES = 2 * 1024 * 1024;
+
+function remoteFileTooLarge(remotePath) {
+  const error = new Error(
+    `${path.posix.basename(String(remotePath))} is larger than ${MAX_REMOTE_FILE_BYTES / (1024 * 1024)} MB, which no phone config is, so it was not read.`
+  );
+  error.status = 422;
+  error.tooLarge = true;
+  return error;
+}
+
+/**
+ * Reads one file from the connected PBX as text, refusing anything over the limit.
+ * Pass `size` when a listing has already said how big the file is, and it is refused
+ * without a round trip. Either way the read itself asks for no more than one byte
+ * past the limit, so the limit holds even when the size was unknown or untrue.
+ */
+async function readRemoteText(remotePath, { size } = {}) {
+  if (Number.isFinite(size) && size > MAX_REMOTE_FILE_BYTES) {
+    throw remoteFileTooLarge(remotePath);
+  }
+
+  const content = await pbx.sftp.get(remotePath, undefined, {
+    readStreamOptions: { start: 0, end: MAX_REMOTE_FILE_BYTES }
+  });
+  const buffer = Buffer.isBuffer(content) ? content : Buffer.from(String(content), "utf8");
+  if (buffer.length > MAX_REMOTE_FILE_BYTES) {
+    throw remoteFileTooLarge(remotePath);
+  }
+  return buffer.toString("utf8");
+}
+
 /**
  * Stores the file as it currently is on the PBX before it is overwritten. Returns
  * null when the file does not exist yet. Any other failure is thrown so the write
@@ -1111,8 +1334,7 @@ async function snapshotBeforeWrite(scope, fileName, remotePath, { user = "", rea
     if (!(await pbx.sftp.exists(remotePath))) {
       return null;
     }
-    const content = await pbx.sftp.get(remotePath);
-    raw = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
+    raw = await readRemoteText(remotePath);
   }
 
   const entry = snapshots.capture({
@@ -1217,8 +1439,7 @@ function resyncLogEntry(fileName, station, result) {
 /** Tells one phone to fetch its config, reading the file to find its extension. */
 async function resyncPhone(fileName, user = "") {
   const remotePath = path.posix.join(pbx.connection.remoteDir, fileName);
-  const content = await pbx.sftp.get(remotePath);
-  const { entries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
+  const { entries } = xmlToEntries(await readRemoteText(remotePath));
   const station = findStationDisplayNameInEntries(entries);
   const ext = findLineExtension(entries);
 
@@ -1248,18 +1469,12 @@ async function resyncChangedPhones(job) {
 
 // --- phone models ------------------------------------------------------------------
 function loadPhoneModels() {
-  ensureDataStore();
-  try {
-    const parsed = JSON.parse(fs.readFileSync(PHONE_MODELS_FILE, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  const parsed = readJsonFile(PHONE_MODELS_FILE, {});
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
 }
 
 function savePhoneModels(map) {
-  ensureDataStore();
-  fs.writeFileSync(PHONE_MODELS_FILE, JSON.stringify(map, null, 2), "utf8");
+  writeJsonFile(PHONE_MODELS_FILE, map);
 }
 
 function getPhoneModel(fileName) {
@@ -1341,9 +1556,90 @@ function buildClonedEntries(sourceEntries, { ext, displayName = "", password = "
 const SEARCH_MODES = new Set(["contains", "exact", "regex"]);
 const MAX_SEARCH_MATCHES_PER_FILE = 20;
 const MAX_SEARCH_PATTERN_LENGTH = 200;
+// More stars than this in one tag pattern is not a pattern anyone means.
+const MAX_WILDCARDS_PER_PATTERN = 8;
+// How long one file's worth of values may take against a typed regular expression.
+// An honest pattern takes microseconds; one with nested repeats can take minutes on a
+// single ordinary value, and all of that time the app would answer nobody.
+const REGEX_TIME_LIMIT_MS = 250;
+// Strings that bring out the usual runaway patterns, tried before a search is started
+// so the person who typed one is told at once.
+const REGEX_PROBES = ["a", "x", "0", "9", " ", "ab", "a1", "a b", "/", ".", "-", "_"]
+  .flatMap((unit) => {
+    const run = unit.repeat(Math.ceil(32 / unit.length));
+    return [run, `${run}!`];
+  });
 
-function escapeRegex(text) {
-  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function tooExpensive(message) {
+  return badRequest(message, { tooExpensive: true });
+}
+
+/**
+ * A case-insensitive test for a pattern whose only special character is "*" (any run
+ * of characters). Matched by walking the text once rather than by a regular
+ * expression, where a pattern such as *a*a*a*a*b takes exponentially long to fail.
+ * Runs of stars count as one; too many separate ones are refused.
+ */
+function buildWildcardTest(pattern) {
+  const collapsed = String(pattern).replace(/\*{2,}/g, "*");
+  const stars = collapsed.split("*").length - 1;
+  if (stars > MAX_WILDCARDS_PER_PATTERN) {
+    throw tooExpensive(`The pattern "${collapsed.length > 60 ? `${collapsed.slice(0, 60)}...` : collapsed}" is too expensive to match: it has ${stars} wildcards, and ${MAX_WILDCARDS_PER_PATTERN} is the most one pattern may have.`);
+  }
+
+  const parts = collapsed.toLowerCase().split("*");
+  if (parts.length === 1) {
+    return (text) => String(text).toLowerCase() === parts[0];
+  }
+
+  const first = parts[0];
+  const last = parts[parts.length - 1];
+  const middle = parts.slice(1, -1);
+  return (text) => {
+    const subject = String(text).toLowerCase();
+    if (subject.length < first.length + last.length || !subject.startsWith(first) || !subject.endsWith(last)) {
+      return false;
+    }
+    // Each middle piece is taken at its first place after the one before; the earliest
+    // fit leaves the most room for the rest, so no backtracking is needed.
+    const end = subject.length - last.length;
+    let from = first.length;
+    for (const piece of middle) {
+      const at = subject.indexOf(piece, from);
+      if (at < 0 || at + piece.length > end) {
+        return false;
+      }
+      from = at + piece.length;
+    }
+    return true;
+  };
+}
+
+/**
+ * Runs a typed regular expression over a batch of values with a time limit, which
+ * only the vm module can put on a regular expression that has already started. A
+ * batch is one file's values: starting the clock per value costs far more than the
+ * matching itself. Throws (400, tooExpensive) when the limit is hit.
+ */
+function buildBoundedRegexTest(re, { timeoutMs = REGEX_TIME_LIMIT_MS } = {}) {
+  const sandbox = vm.createContext(Object.create(null));
+  sandbox.re = re;
+  sandbox.texts = [];
+  const script = new vm.Script("texts.map((text) => re.test(text))");
+
+  return (values, { timeoutMs: limit = timeoutMs } = {}) => {
+    sandbox.texts = values.map((value) => String(value));
+    try {
+      return script.runInContext(sandbox, { timeout: limit }).map(Boolean);
+    } catch (error) {
+      if (error && error.code === "ERR_SCRIPT_EXECUTION_TIMEOUT") {
+        throw tooExpensive("That regular expression is too expensive to run: it takes too long on ordinary values, usually because of a repeat inside a repeat such as (a+)+. Simplify it and search again.");
+      }
+      throw error;
+    } finally {
+      sandbox.texts = [];
+    }
+  };
 }
 
 /**
@@ -1363,18 +1659,12 @@ function buildSearchCriteria({ tag, value, mode } = {}) {
     throw new Error(`Search terms are limited to ${MAX_SEARCH_PATTERN_LENGTH} characters.`);
   }
 
-  let tagTest = null;
-  if (tagText) {
-    if (tagText.includes("*")) {
-      const re = new RegExp(`^${tagText.split("*").map(escapeRegex).join(".*")}$`, "i");
-      tagTest = (key) => re.test(key);
-    } else {
-      const wanted = tagText.toLowerCase();
-      tagTest = (key) => key.toLowerCase() === wanted;
-    }
-  }
+  // Exact (ignoring case) without a star; see buildWildcardTest for one with.
+  const tagTest = tagText ? buildWildcardTest(tagText) : null;
 
   let valueTest = null;
+  // Set for a regular expression only: tests a whole file's values under one time limit.
+  let valueTestMany = null;
   if (valueText) {
     if (matchMode === "regex") {
       let re;
@@ -1383,7 +1673,10 @@ function buildSearchCriteria({ tag, value, mode } = {}) {
       } catch (error) {
         throw new Error(`Invalid regular expression: ${error.message}`);
       }
-      valueTest = (v) => re.test(v);
+      valueTestMany = buildBoundedRegexTest(re);
+      // Refused here, before any file is read, when it already runs away on these.
+      valueTestMany(REGEX_PROBES, { timeoutMs: 100 });
+      valueTest = (v) => valueTestMany([v])[0];
     } else if (matchMode === "exact") {
       valueTest = (v) => v === valueText;
     } else {
@@ -1392,24 +1685,29 @@ function buildSearchCriteria({ tag, value, mode } = {}) {
     }
   }
 
-  return { tag: tagText, value: valueText, mode: matchMode, tagTest, valueTest };
+  return { tag: tagText, value: valueText, mode: matchMode, tagTest, valueTest, valueTestMany };
 }
 
 /** The entries of one file that satisfy the criteria, as { tag, value }. */
 function matchEntries(entries, criteria) {
-  const out = [];
+  const named = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
     const key = String(entry?.key || "");
     const value = String(entry?.value == null ? "" : entry.value);
     if (criteria.tagTest && !criteria.tagTest(key)) {
       continue;
     }
-    if (criteria.valueTest && !criteria.valueTest(value)) {
-      continue;
-    }
-    out.push({ tag: key, value });
+    named.push({ tag: key, value });
   }
-  return out;
+
+  if (!criteria.valueTest || named.length === 0) {
+    return named;
+  }
+  if (criteria.valueTestMany) {
+    const hits = criteria.valueTestMany(named.map((item) => item.value));
+    return named.filter((item, index) => hits[index]);
+  }
+  return named.filter((item) => criteria.valueTest(item.value));
 }
 
 /** Read-only scan of every config on the PBX. Results hold only the files that matched. */
@@ -1419,10 +1717,11 @@ async function runSearchJob(job) {
 
   ensureConnected();
   const remoteList = await pbx.sftp.list(remoteDir);
-  const fileNames = remoteList
+  const listed = remoteList
     .filter((item) => item.type !== "d" && /^spa.*\.xml$/i.test(item.name))
-    .map((item) => item.name)
-    .sort((a, b) => a.localeCompare(b));
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const fileNames = listed.map((item) => item.name);
+  const sizes = new Map(listed.map((item) => [item.name, item.size]));
 
   job.total = fileNames.length;
   job.unmatched = 0;
@@ -1431,8 +1730,7 @@ async function runSearchJob(job) {
     job.currentFile = fileName;
     ensureConnected();
     try {
-      const content = await pbx.sftp.get(path.posix.join(remoteDir, fileName));
-      const { entries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
+      const { entries } = xmlToEntries(await readRemoteText(path.posix.join(remoteDir, fileName), { size: sizes.get(fileName) }));
       const matches = matchEntries(entries, criteria);
 
       if (matches.length === 0) {
@@ -1452,6 +1750,10 @@ async function runSearchJob(job) {
         }))
       });
     } catch (error) {
+      // A pattern that ran out of time on this file will on the next too: stop the search.
+      if (error && error.tooExpensive) {
+        throw error;
+      }
       job.results.push({
         name: fileName,
         station: fileMetadataCache.get(buildCacheKey(fileName))?.stationDisplayName || "",
@@ -1544,16 +1846,16 @@ async function loadProvisionSource(source) {
     if (!Array.isArray(template.entries) || template.entries.length === 0) {
       throw new Error(`Template "${template.name}" is empty.`);
     }
-    return { label: `template "${template.name}"`, rootKey: template.rootKey || "flat-profile", entries: normalizeEntries(template.entries), model: null };
+    return { label: `template "${template.name}"`, rootKey: template.rootKey || "flat-profile", entries: normalizeEntries(template.entries), model: null, declaration: "" };
   }
 
   const remotePath = path.posix.join(pbx.connection.remoteDir, source.file);
   if (!(await pbx.sftp.exists(remotePath))) {
     throw new Error(`Source file not found: ${source.file}`);
   }
-  const content = await pbx.sftp.get(remotePath);
-  const { rootKey, entries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
-  return { label: source.file, rootKey: rootKey || "flat-profile", entries, model: getPhoneModel(source.file) };
+  const xmlText = await readRemoteText(remotePath);
+  const { rootKey, entries } = xmlToEntries(xmlText);
+  return { label: source.file, rootKey: rootKey || "flat-profile", entries, model: getPhoneModel(source.file), declaration: xmlDeclarationOf(xmlText) };
 }
 
 /** Creates (or, as a dry run, only checks) every phone in the list. */
@@ -1612,7 +1914,7 @@ async function runProvisionJob(job) {
         continue;
       }
 
-      const xml = entriesToXml(loaded.rootKey, entries);
+      const xml = entriesToXml(loaded.rootKey, entries, { declaration: loaded.declaration });
       await pbx.sftp.put(Buffer.from(xml, "utf8"), remotePath);
 
       setFileMetadataCacheEntry(buildCacheKey(plan.fileName), {
@@ -1677,9 +1979,9 @@ function buildTagMatcher(patterns) {
     if (pattern.length > MAX_SEARCH_PATTERN_LENGTH) {
       throw new Error(`Tag patterns are limited to ${MAX_SEARCH_PATTERN_LENGTH} characters.`);
     }
-    return new RegExp(`^${pattern.split("*").map(escapeRegex).join(".*")}$`, "i");
+    return buildWildcardTest(pattern);
   });
-  const matcher = (key) => tests.some((re) => re.test(key));
+  const matcher = (key) => tests.some((test) => test(key));
   matcher.patterns = list;
   return matcher;
 }
@@ -1705,17 +2007,20 @@ async function runDriftJob(job) {
   if (!(await pbx.sftp.exists(path.posix.join(remoteDir, criteria.baseline)))) {
     throw new Error(`Baseline file not found: ${criteria.baseline}`);
   }
-  const baseContent = await pbx.sftp.get(path.posix.join(remoteDir, criteria.baseline));
-  const baselineEntries = xmlToEntries(Buffer.isBuffer(baseContent) ? baseContent.toString("utf8") : String(baseContent)).entries;
+  const baselineEntries = xmlToEntries(await readRemoteText(path.posix.join(remoteDir, criteria.baseline))).entries;
   criteria.baselineStation = findStationDisplayNameInEntries(baselineEntries);
 
   let fileNames = requested;
+  const sizes = new Map();
   if (!fileNames) {
     const remoteList = await pbx.sftp.list(remoteDir);
-    fileNames = remoteList
+    const listed = remoteList
       .filter((item) => item.type !== "d" && /^spa.*\.xml$/i.test(item.name))
-      .map((item) => item.name)
-      .sort((a, b) => a.localeCompare(b));
+      .sort((a, b) => a.name.localeCompare(b.name));
+    fileNames = listed.map((item) => item.name);
+    for (const item of listed) {
+      sizes.set(item.name, item.size);
+    }
   }
   fileNames = fileNames.filter((name) => name !== criteria.baseline);
 
@@ -1726,8 +2031,7 @@ async function runDriftJob(job) {
     job.currentFile = fileName;
     ensureConnected();
     try {
-      const content = await pbx.sftp.get(path.posix.join(remoteDir, fileName));
-      const { entries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
+      const { entries } = xmlToEntries(await readRemoteText(path.posix.join(remoteDir, fileName), { size: sizes.get(fileName) }));
       const differences = compareToBaseline(baselineEntries, entries, { include, ignore });
 
       if (differences.length === 0) {
@@ -1770,6 +2074,8 @@ function bulkJobIsRunning() {
 /** Runs a job in the background; the client polls /api/bulk-edit/:jobId for progress. */
 function launchJob(job, runner) {
   const key = pbx.key;
+  // Which PBX the job ran on, so it can only ever be undone on that one.
+  job.pbxKey = key;
   bulkJobs.set(job.id, job);
   activeJobs.set(key, job.id);
 
@@ -1856,9 +2162,9 @@ async function runBulkJob(job) {
     const remotePath = path.posix.join(remoteDir, fileName);
 
     try {
-      const content = await pbx.sftp.get(remotePath);
-      const xmlText = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
+      const xmlText = await readRemoteText(remotePath);
       const { rootKey, entries } = xmlToEntries(xmlText);
+      const declaration = xmlDeclarationOf(xmlText);
 
       // Identifies the phone in results and logs; file names are MAC addresses.
       const station = findStationDisplayNameInEntries(entries);
@@ -1896,8 +2202,8 @@ async function runBulkJob(job) {
       }
 
       // Compare rebuilt-vs-rebuilt so a no-op edit never rewrites (and reformats) a file.
-      const currentXml = entriesToXml(rootKey, entries);
-      const nextXml = entriesToXml(rootKey, working);
+      const currentXml = entriesToXml(rootKey, entries, { declaration });
+      const nextXml = entriesToXml(rootKey, working, { declaration });
 
       if (currentXml === nextXml) {
         job.results.push({
@@ -2045,6 +2351,7 @@ app.post("/api/bulk-edit", (req, res) => {
       if (!targetKey) {
         return res.status(400).json({ error: "Tag name is required." });
       }
+      assertXmlName(targetKey, "Tag name");
       if (!BULK_EDIT_MODES.has(editMode)) {
         return res.status(400).json({ error: `Unknown mode: ${editMode}` });
       }
@@ -2064,6 +2371,9 @@ app.post("/api/bulk-edit", (req, res) => {
 
     const fileNames = req.body.fileNames.map((name) => sanitizeFileName(name));
     const isDryRun = dryRun !== false;
+    if (!isDryRun) {
+      ensureChangeLogReadable();
+    }
     const primary = edits[0];
 
     const job = {
@@ -2177,6 +2487,9 @@ app.post("/api/provision", authGuard.requireWriter, (req, res) => {
     }
 
     const isDryRun = req.body?.dryRun !== false;
+    if (!isDryRun) {
+      ensureChangeLogReadable();
+    }
     const job = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       status: "running",
@@ -2274,6 +2587,8 @@ app.post("/api/bulk-edit/:jobId/rollback", authGuard.requireWriter, (req, res) =
     ensureConnected();
     pruneBulkJobs();
 
+    ensureChangeLogReadable();
+
     const source = bulkJobs.get(String(req.params.jobId || ""));
     if (!source) {
       return res.status(404).json({ error: "Job not found or expired." });
@@ -2282,9 +2597,12 @@ app.post("/api/bulk-edit/:jobId/rollback", authGuard.requireWriter, (req, res) =
       return res.status(400).json({ error: "Only a completed apply can be rolled back." });
     }
 
+    // A batch is undone on the PBX it was applied to and no other: the copies it would
+    // put back are that PBX's files. The job id comes from the request, so both the
+    // connection the job ran on and the server it logged against must be this session's.
     const scope = buildLogScope(pbx.connection);
-    if (source.request.scope?.key !== scope.key) {
-      return res.status(409).json({ error: "That batch was applied to a different server. Connect to it first." });
+    if (source.pbxKey !== pbx.key || source.request.scope?.key !== scope.key) {
+      return res.status(409).json({ error: "That batch was applied to a different server. Connect to it first.", differentPbx: true });
     }
     if (bulkJobIsRunning()) {
       return res.status(409).json({ error: "A bulk edit is already running. Wait for it to finish." });
@@ -2385,7 +2703,9 @@ app.get("/api/logs/:scopeKey", (req, res) => {
   });
 });
 
-app.delete("/api/logs/:scopeKey", authGuard.requireWriter, (req, res) => {
+// The change log is the record of who changed which phone, so only an administrator
+// may clear it (and the audit log, which nobody can clear, notes that they did).
+app.delete("/api/logs/:scopeKey", authGuard.requireAdmin, (req, res) => {
   const key = String(req.params.scopeKey || "");
   const log = loadChangeLog();
 
@@ -2405,7 +2725,10 @@ app.get("/api/servers", (req, res) => {
   res.json({ servers });
 });
 
-app.post("/api/servers", authGuard.requireWriter, (req, res) => {
+// Saved servers are an administrator's to change. A profile says which host the app
+// connects to (and so where a typed PBX password is sent) and which commands it runs
+// on that PBX over SSH, which is more than editing phones.
+app.post("/api/servers", authGuard.requireAdmin, (req, res) => {
   try {
     const profile = sanitizeServerProfile(req.body || {});
     const servers = loadServers();
@@ -2420,11 +2743,13 @@ app.post("/api/servers", authGuard.requireWriter, (req, res) => {
     saveServers(servers);
     res.json({ ok: true, profile });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    // What was typed is at fault (400) unless the error says otherwise: a servers.json
+    // that cannot be read is the app's problem, and answers 503.
+    res.status(error.status || 400).json({ error: error.message });
   }
 });
 
-app.delete("/api/servers/:id", authGuard.requireWriter, (req, res) => {
+app.delete("/api/servers/:id", authGuard.requireAdmin, (req, res) => {
   const id = String(req.params.id || "").trim();
   if (!id) {
     return res.status(400).json({ error: "Server id is required." });
@@ -2468,7 +2793,7 @@ app.get("/api/templates/:id", (req, res) => {
 app.post("/api/templates", authGuard.requireWriter, (req, res) => {
   try {
     const name = String(req.body?.name || "").trim();
-    const rootKey = String(req.body?.rootKey || "flat-profile").trim() || "flat-profile";
+    const rootKey = assertXmlName(String(req.body?.rootKey || "flat-profile").trim() || "flat-profile", "Root element");
     const entries = normalizeEntries(req.body?.entries || []);
 
     if (!name) {
@@ -2489,9 +2814,20 @@ app.post("/api/templates", authGuard.requireWriter, (req, res) => {
     saveTemplates(templates);
     res.json({ ok: true, template: { id: next.id, name: next.name, rootKey: next.rootKey } });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(error.status || 400).json({ error: error.message });
   }
 });
+// How many PBXs may be connected at once. Each is a live SSH session held open with
+// keepalives, on the PBX's side as well as this one.
+const MAX_LINKS = 10;
+
+function tooManyLinks(res) {
+  return res.status(409).json({
+    error: `${MAX_LINKS} PBXs are already connected, which is the most this app keeps open at once. Disconnect one, then connect again.`,
+    tooManyConnections: true
+  });
+}
+
 app.post("/api/connect", async (req, res) => {
   const { profileId, host, port, username, password, remoteDir } = req.body || {};
 
@@ -2505,6 +2841,17 @@ app.post("/api/connect", async (req, res) => {
       return res.status(400).json({ error: "Saved PBX server not found." });
     }
   } else {
+    // Any signed-in account may connect through a saved server. Naming a host, user,
+    // directory or the app's SSH key directly is an administrator's: it is the same
+    // decision as saving a profile, and otherwise anyone could point the app (and its
+    // key) at a machine of their choosing.
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        error: "Only an administrator can connect to a PBX that is not a saved server. Choose one of the saved servers.",
+        adminOnly: true
+      });
+    }
+
     if (!host || !username || !remoteDir) {
       return res.status(400).json({ error: "host, username, and remoteDir are required for direct connection." });
     }
@@ -2535,6 +2882,19 @@ app.post("/api/connect", async (req, res) => {
   const targetKey = target.id ? `profile:${target.id}` : `host:${target.host}|dir:${target.remoteDir}`;
   const sid = sessionIdOf(req);
 
+  // Reconnecting a PBX that is already connected replaces its link, so it always fits.
+  if (!links.has(targetKey) && links.size >= MAX_LINKS) {
+    return tooManyLinks(res);
+  }
+
+  // Checked before dialling: with no readable record of host keys there is nothing to
+  // hold the PBX's key against, so no connection is attempted at all.
+  try {
+    hostKeys.assertReadable();
+  } catch (error) {
+    return res.status(error.status || 503).json({ error: error.message });
+  }
+
   const client = new SftpClient();
   const hostPort = Number(target.port) || 22;
   const hostKey = hostKeys.verifierFor(target.host, hostPort);
@@ -2558,6 +2918,10 @@ app.post("/api/connect", async (req, res) => {
       if (hostKey.outcome.status === "mismatch") {
         throw hostKeys.mismatchError(target.host, hostPort, hostKey.outcome);
       }
+      // The key could not be checked or recorded (see host-keys.js), so it was refused.
+      if (hostKey.outcome.status === "error") {
+        throw hostKey.outcome.error;
+      }
       if (useKey && /authentication methods failed/i.test(error.message || "")) {
         throw new Error(`${target.host} did not accept the app's SSH key for ${target.username}. Add the public key shown under Settings to that user's ~/.ssh/authorized_keys on the PBX.`);
       }
@@ -2570,7 +2934,15 @@ app.post("/api/connect", async (req, res) => {
       return res.status(400).json({ error: `Remote directory does not exist: ${target.remoteDir}` });
     }
 
+    // Another connect may have taken the last place while this one was dialling.
+    if (!links.has(targetKey) && links.size >= MAX_LINKS) {
+      await client.end();
+      return tooManyLinks(res);
+    }
+
     const connection = {
+      // What the browser sends back as X-Pbx-Key, so a tab left on another PBX is caught.
+      key: targetKey,
       host: target.host,
       port: Number(target.port) || 22,
       username: target.username,
@@ -2630,7 +3002,7 @@ app.post("/api/connect", async (req, res) => {
       });
     }
 
-    return res.status(500).json({ error: error.message || "Connection failed." });
+    return res.status(error.code === "HOST_KEY_STORE_UNREADABLE" ? 503 : 500).json({ error: error.message || "Connection failed." });
   }
 });
 
@@ -2746,6 +3118,9 @@ app.get("/api/files", async (req, res) => {
       .sort((a, b) => a.name.localeCompare(b.name));
 
     const files = [];
+    // Written back once at the end: a first listing of a few hundred phones would
+    // otherwise rewrite the whole cache file a few hundred times.
+    let cacheChanged = false;
     for (const item of xmlFiles) {
       const cacheKey = buildCacheKey(item.name);
       const cached = fileMetadataCache.get(cacheKey);
@@ -2767,20 +3142,20 @@ app.get("/api/files", async (req, res) => {
       let extension = "";
 
       try {
-        const content = await pbx.sftp.get(remotePath);
-        const xmlText = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
+        const xmlText = await readRemoteText(remotePath, { size: item.size });
         stationDisplayName = extractStationDisplayName(xmlText);
         extension = findLineExtension(xmlToEntries(xmlText).entries) || "";
       } catch (_) {
         stationDisplayName = "";
       }
 
-      setFileMetadataCacheEntry(cacheKey, {
+      fileMetadataCache.set(cacheKey, {
         size: item.size,
         modified: item.modifyTime,
         stationDisplayName,
         extension
       });
+      cacheChanged = true;
 
       files.push({
         name: item.name,
@@ -2789,6 +3164,10 @@ app.get("/api/files", async (req, res) => {
         stationDisplayName,
         extension
       });
+    }
+
+    if (cacheChanged) {
+      persistFileMetadataCache();
     }
 
     // The phone model each file is recorded as, for listings that show it.
@@ -2810,8 +3189,7 @@ app.get("/api/files/:name", async (req, res) => {
     const fileName = sanitizeFileName(req.params.name);
     const remotePath = path.posix.join(pbx.connection.remoteDir, fileName);
 
-    const content = await pbx.sftp.get(remotePath);
-    const xmlText = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
+    const xmlText = await readRemoteText(remotePath);
 
     const { rootKey, entries } = xmlToEntries(xmlText);
 
@@ -2865,6 +3243,8 @@ app.delete("/api/files/:name", authGuard.requireWriter, async (req, res) => {
       return res.status(404).json({ error: `File not found: ${fileName}` });
     }
 
+    ensureChangeLogReadable();
+
     // Throws if the copy cannot be kept, in which case nothing is deleted.
     const snapshot = await snapshotBeforeWrite(scope, fileName, remotePath, { user, reason: "delete" });
     const entries = xmlToEntries(snapshot.xmlText).entries;
@@ -2911,6 +3291,8 @@ app.post("/api/files/:name/replace", authGuard.requireWriter, async (req, res) =
       return res.status(400).json({ error: "The new MAC is the same as the current one." });
     }
 
+    ensureChangeLogReadable();
+
     const sourcePath = path.posix.join(pbx.connection.remoteDir, source);
     const targetPath = path.posix.join(pbx.connection.remoteDir, fileName);
     if (!(await pbx.sftp.exists(sourcePath))) {
@@ -2922,8 +3304,7 @@ app.post("/api/files/:name/replace", authGuard.requireWriter, async (req, res) =
 
     const scope = buildLogScope(pbx.connection);
     const user = req.user ? req.user.username : "";
-    const content = await pbx.sftp.get(sourcePath);
-    const xmlText = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
+    const xmlText = await readRemoteText(sourcePath);
     const entries = xmlToEntries(xmlText).entries;
     const station = findStationDisplayNameInEntries(entries);
 
@@ -2995,6 +3376,8 @@ app.post("/api/files/clone", authGuard.requireWriter, async (req, res) => {
       return res.status(400).json({ error: "The new file needs a different name from the phone it is cloned from." });
     }
 
+    ensureChangeLogReadable();
+
     const sourcePath = path.posix.join(pbx.connection.remoteDir, source);
     const targetPath = path.posix.join(pbx.connection.remoteDir, fileName);
     if (!(await pbx.sftp.exists(sourcePath))) {
@@ -3004,8 +3387,8 @@ app.post("/api/files/clone", authGuard.requireWriter, async (req, res) => {
       return res.status(400).json({ error: `File already exists: ${fileName}` });
     }
 
-    const content = await pbx.sftp.get(sourcePath);
-    const { rootKey, entries: sourceEntries } = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content));
+    const sourceXml = await readRemoteText(sourcePath);
+    const { rootKey, entries: sourceEntries } = xmlToEntries(sourceXml);
 
     let entries;
     try {
@@ -3019,7 +3402,7 @@ app.post("/api/files/clone", authGuard.requireWriter, async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
 
-    const xml = entriesToXml(rootKey || "flat-profile", entries);
+    const xml = entriesToXml(rootKey || "flat-profile", entries, { declaration: xmlDeclarationOf(sourceXml) });
     await pbx.sftp.put(Buffer.from(xml, "utf8"), targetPath);
 
     const stationDisplayName = findStationDisplayNameInEntries(entries);
@@ -3060,25 +3443,44 @@ app.post("/api/files/:name", authGuard.requireWriter, async (req, res) => {
     ensureConnected();
 
     const fileName = sanitizeFileName(req.params.name);
-    const rootKey = String(req.body?.rootKey || "flat-profile").trim() || "flat-profile";
+    const rootKey = assertXmlName(String(req.body?.rootKey || "flat-profile").trim() || "flat-profile", "Root element");
     const entries = normalizeEntries(req.body?.entries || []);
 
-    const xml = entriesToXml(rootKey, entries);
+    // A config with nothing in it is what a form that never finished loading would
+    // send, and saving it would blank the phone. It has to be asked for.
+    if (entries.length === 0 && req.body?.allowEmpty !== true) {
+      return res.status(400).json({
+        error: `${fileName} was not saved: there are no settings in it. Saving an empty config has to be asked for explicitly.`,
+        empty: true
+      });
+    }
+    if (bulkJobIsRunning()) {
+      return res.status(409).json({ error: "A bulk edit is running. Wait for it to finish." });
+    }
+
     const remotePath = path.posix.join(pbx.connection.remoteDir, fileName);
 
     const scope = buildLogScope(pbx.connection);
     const user = req.user ? req.user.username : "";
 
+    ensureChangeLogReadable();
+
     // Read the file as it is now. Null means a brand new file.
     let currentXml = null;
     if (await pbx.sftp.exists(remotePath)) {
-      const existing = await pbx.sftp.get(remotePath);
-      currentXml = Buffer.isBuffer(existing) ? existing.toString("utf8") : String(existing);
+      currentXml = await readRemoteText(remotePath);
+    }
+
+    // A save that does not say which version of the file it started from cannot be
+    // checked against what is there now. That is right for a new file; over an existing
+    // one it would silently replace it, so the caller has to say it means to.
+    const expectedVersion = req.body?.expectedVersion ? String(req.body.expectedVersion) : null;
+    if (currentXml !== null && !expectedVersion && req.body?.overwrite !== true) {
+      return res.status(409).json({ error: `${fileName} already exists on the PBX.`, exists: true });
     }
 
     // Refuse to overwrite a change made since the editor loaded the file. Checked
     // before anything is stored so a refused save leaves no trace.
-    const expectedVersion = req.body?.expectedVersion ? String(req.body.expectedVersion) : null;
     if (expectedVersion && currentXml !== null && contentVersion(currentXml) !== expectedVersion) {
       const last = lastLoggedWrite(scope, fileName);
       const by = last
@@ -3091,6 +3493,10 @@ app.post("/api/files/:name", authGuard.requireWriter, async (req, res) => {
         lastWrite: last
       });
     }
+
+    // Built before anything is stored, like the checks above. A file that began with
+    // an XML declaration keeps it.
+    const xml = entriesToXml(rootKey, entries, { declaration: currentXml === null ? "" : xmlDeclarationOf(currentXml) });
 
     // Keep the file as it is now. It is what Restore brings back, and it is the
     // "before" side of the field-level diff in the log.
@@ -3166,8 +3572,7 @@ app.get("/api/files/:name/history/:id", async (req, res) => {
     let current = null;
 
     if (await pbx.sftp.exists(remotePath)) {
-      const content = await pbx.sftp.get(remotePath);
-      current = xmlToEntries(Buffer.isBuffer(content) ? content.toString("utf8") : String(content)).entries;
+      current = xmlToEntries(await readRemoteText(remotePath)).entries;
     }
 
     const { content, ...version } = snapshot;
@@ -3199,6 +3604,7 @@ app.post("/api/files/:name/restore", authGuard.requireWriter, async (req, res) =
       return res.status(400).json({ error: "snapshotId is required." });
     }
 
+    ensureChangeLogReadable();
     const result = await restoreSnapshot(fileName, snapshotId, req.user ? req.user.username : "");
     res.json({ ok: true, message: `Restored ${fileName}`, ...result });
   } catch (error) {
@@ -3279,6 +3685,7 @@ app.post("/api/files/:name/resync", authGuard.requireWriter, async (req, res) =>
   try {
     ensureConnected();
     const fileName = sanitizeFileName(req.params.name);
+    ensureChangeLogReadable();
     const result = await resyncPhone(fileName, req.user ? req.user.username : "");
 
     if (result.status === "skipped") {
@@ -3297,11 +3704,23 @@ app.post("/api/files/:name/resync", authGuard.requireWriter, async (req, res) =>
 
 // Runs the resync command for a typed extension and shows exactly what the PBX said,
 // for working out group membership, sudo, or PJSIP-vs-chan_sip problems.
+//
+// A command typed into the request is an administrator's to run: it goes to the PBX's
+// shell as written. Anyone else who may resync tests the connected server's own command.
 app.post("/api/resync/test", authGuard.requireWriter, async (req, res) => {
   try {
     ensureConnected();
+    req.auditTarget = pbx.connection.profileName || pbx.connection.host;
     const ext = String(req.body?.ext || "").trim();
-    const template = resolveResyncCommand(req.body?.resyncCommand ?? pbx.connection.resyncCommand);
+    const isAdmin = req.user?.role === "admin";
+    const typed = req.body?.resyncCommand;
+    if (!isAdmin && typed != null && String(typed).trim() !== "") {
+      return res.status(403).json({
+        error: "Only an administrator can test a command typed here. Leave it out to test the connected server's own resync command.",
+        adminOnly: true
+      });
+    }
+    const template = resolveResyncCommand(isAdmin ? (typed ?? pbx.connection.resyncCommand) : pbx.connection.resyncCommand);
     const command = buildResyncCommand(template, ext);
     const output = await execOverSsh(pbx.sftp.client, command);
     const verdict = classifyResyncOutput(output);
@@ -3317,10 +3736,12 @@ app.post("/api/files", authGuard.requireWriter, async (req, res) => {
     ensureConnected();
 
     const fileName = sanitizeFileName(req.body?.fileName || "");
-    const rootKey = String(req.body?.rootKey || "flat-profile").trim() || "flat-profile";
+    const rootKey = assertXmlName(String(req.body?.rootKey || "flat-profile").trim() || "flat-profile", "Root element");
     const entries = normalizeEntries(req.body?.entries || []);
 
     const remotePath = path.posix.join(pbx.connection.remoteDir, fileName);
+    ensureChangeLogReadable();
+
     const exists = await pbx.sftp.exists(remotePath);
     if (exists) {
       return res.status(400).json({ error: `File already exists: ${fileName}` });
@@ -3386,6 +3807,11 @@ app.use((error, req, res, next) => {
 // Only boot when run directly, so tests can require the pure helpers below
 // without starting a listener.
 if (require.main === module) {
+  // Everything this process creates is for its own account only: the data directory
+  // holds password hashes, session ids, the SSH key and copies of phone configs with
+  // their SIP passwords.
+  process.umask(0o077);
+
   ensureDataStore();
   loadFileMetadataCache();
 
@@ -3402,6 +3828,30 @@ if (require.main === module) {
   const server = tlsOptions
     ? require("https").createServer({ key: tlsOptions.key, cert: tlsOptions.cert }, app)
     : require("http").createServer(app);
+
+  // Asked to stop (docker stop, Ctrl+C): finish what is being answered, close the PBX
+  // connections and leave. Without a handler the signal ends the process on the spot,
+  // which can be in the middle of writing one of the data files.
+  let stopping = false;
+  const shutdown = (signal) => {
+    if (stopping) {
+      return;
+    }
+    stopping = true;
+    console.log(`${signal} received: closing.`);
+    const leave = () => process.exit(0);
+    // Requests still open after a few seconds (a long poll, a stalled client) do not hold it up.
+    setTimeout(leave, 5000).unref();
+    for (const key of [...links.keys()]) {
+      closeLink(key, "").catch(() => {});
+    }
+    server.close(leave);
+    if (typeof server.closeIdleConnections === "function") {
+      server.closeIdleConnections();
+    }
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 
   server.listen(PORT, () => {
     console.log(`PBX MPP Config Manager running at ${scheme}://localhost:${PORT}`);
@@ -3435,7 +3885,7 @@ if (require.main === module) {
     if (authGuard.cookieSecure) {
       console.log("Session cookie: Secure (requires HTTPS end to end - sign-in fails over plain HTTP)");
     } else if (tlsOptions) {
-      console.log("Session cookie: not Secure - this app is serving HTTPS, so set COOKIE_SECURE=true");
+      console.log("Session cookie: not Secure, because COOKIE_SECURE=false is set - this app is serving HTTPS, so remove that or set it to true");
     } else {
       console.log("Session cookie: not Secure (fine on loopback; set COOKIE_SECURE=true behind HTTPS)");
     }
@@ -3462,6 +3912,11 @@ module.exports = {
   compareToBaseline,
   DEFAULT_DRIFT_IGNORE,
   buildClonedEntries,
+  buildWildcardTest,
+  assertXmlName,
+  xmlDeclarationOf,
+  MAX_REMOTE_FILE_BYTES,
+  MAX_LINKS,
   entriesToXml,
   extractStationDisplayName,
   findStationDisplayNameInEntries,

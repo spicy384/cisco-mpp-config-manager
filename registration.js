@@ -41,8 +41,15 @@ function hostFromUri(uri) {
   return m ? { ip: m[1], port: m[2] ? Number(m[2]) : null } : { ip: "", port: null };
 }
 
+// Contacts are keyed by whatever name the PBX printed. An object with no prototype
+// keeps a name such as "constructor" or "__proto__" an ordinary key, rather than one
+// that reads back something inherited.
+function emptyContacts() {
+  return Object.create(null);
+}
+
 function parsePjsipContacts(output) {
-  const contacts = {};
+  const contacts = emptyContacts();
   const line = /^\s*Contact:\s+(\S+?)\/(\S+)\s+(\S+)\s+(\w+)\s+(\S+)\s*$/;
 
   for (const raw of String(output || "").split(/\r?\n/)) {
@@ -69,7 +76,7 @@ function parsePjsipContacts(output) {
 }
 
 function parseSipPeers(output) {
-  const contacts = {};
+  const contacts = emptyContacts();
   // Name/username  Host  Dyn  Forcerport  Comedia  ACL  Port  Status  Description
   const line = /^(\S+?)(?:\/\S+)?\s+(\S+)\s.*?\s(\d+)\s+(OK|UNREACHABLE|UNKNOWN|Unmonitored|LAGGED)\b(?:\s*\(([\d.]+) ms\))?/;
 
@@ -109,7 +116,7 @@ function parseRegistrations(output) {
   if (/^Name\/username/m.test(text)) {
     return { format: "chan_sip", contacts: parseSipPeers(text) };
   }
-  return { format: "unknown", contacts: {} };
+  return { format: "unknown", contacts: emptyContacts() };
 }
 
 /** Status for one extension: what the PBX said, or unregistered if it said nothing. */
@@ -117,7 +124,9 @@ function statusForExtension(contacts, ext) {
   if (!ext) {
     return null;
   }
-  return contacts[ext] || { ext, status: STATUS.unregistered, state: "", ip: "", port: null, rtt: null, uri: "" };
+  // Own keys only, so a caller's plain object cannot answer with an inherited member.
+  const known = contacts && Object.prototype.hasOwnProperty.call(contacts, ext) ? contacts[ext] : null;
+  return known || { ext, status: STATUS.unregistered, state: "", ip: "", port: null, rtt: null, uri: "" };
 }
 
 module.exports = {

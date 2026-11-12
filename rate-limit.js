@@ -60,6 +60,10 @@ function createRateLimiter({ windowMs = DEFAULT_WINDOW_MS, maxFailures = DEFAULT
     const key = keyFor(req);
     const wait = retryAfter(key);
     if (wait > 0) {
+      // Marked so the audit log can leave these out: the attempts that earned the block
+      // are already recorded, and a line per throttled request would let anyone who can
+      // reach the sign-in page push every other event out of the log.
+      req.rateLimited = true;
       res.setHeader("Retry-After", String(wait));
       return res.status(429).json({ error: `Too many failed sign-in attempts from your address. Try again in ${wait >= 120 ? `${Math.ceil(wait / 60)} minutes` : `${wait} seconds`}.` });
     }

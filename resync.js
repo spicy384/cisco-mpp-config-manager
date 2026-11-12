@@ -14,6 +14,10 @@ const DEFAULT_RESYNC_COMMAND = 'asterisk -rx "pjsip send notify cisco-check-cfg 
 // NOTIFY type Asterisk does not ship, so it is treated as "use the default".
 const LEGACY_DEFAULT_RESYNC_COMMAND = 'asterisk -rx "pjsip send notify cisco-check-sync endpoint {ext}"';
 const EXEC_TIMEOUT_MS = 20000;
+// What is kept of a command's output, per stream. Anything a resync or status command
+// has to say fits many times over; a command that prints without end must not be able
+// to fill the app's memory.
+const MAX_EXEC_OUTPUT_BYTES = 64 * 1024;
 
 // The extension is the only thing interpolated into a shell command, so it is
 // held to characters that can never break out of the quoting around it.
@@ -90,10 +94,60 @@ function classifyResyncOutput({ code, stdout = "", stderr = "" }) {
   return { ok: true, detail: out };
 }
 
-/** Runs one command on the PBX over an ssh2 client and collects what it printed. */
-function execOverSsh(sshClient, command, { timeoutMs = EXEC_TIMEOUT_MS } = {}) {
+/** Collects a stream's output up to a limit, then keeps reading (so the command is not stalled) but drops the rest. */
+function boundedCollector(maxBytes) {
+  const chunks = [];
+  let kept = 0;
+  let truncated = false;
+  return {
+    add(chunk) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
+      const room = maxBytes - kept;
+      if (room <= 0) {
+        truncated = truncated || buffer.length > 0;
+        return;
+      }
+      if (buffer.length > room) {
+        chunks.push(buffer.subarray(0, room));
+        kept += room;
+        truncated = true;
+        return;
+      }
+      chunks.push(buffer);
+      kept += buffer.length;
+    },
+    text() {
+      return Buffer.concat(chunks).toString("utf8");
+    },
+    get truncated() {
+      return truncated;
+    }
+  };
+}
+
+/**
+ * Runs one command on the PBX over an ssh2 client and collects what it printed, up to
+ * `maxOutputBytes` per stream. On a timeout the channel is closed, so a command that
+ * hangs does not keep a session open on the PBX for the life of the connection.
+ */
+function execOverSsh(sshClient, command, { timeoutMs = EXEC_TIMEOUT_MS, maxOutputBytes = MAX_EXEC_OUTPUT_BYTES } = {}) {
   return new Promise((resolve, reject) => {
     let settled = false;
+    let channel = null;
+    const closeChannel = () => {
+      if (!channel) {
+        return;
+      }
+      try {
+        if (typeof channel.close === "function") {
+          channel.close();
+        } else if (typeof channel.destroy === "function") {
+          channel.destroy();
+        }
+      } catch {
+        // Already gone.
+      }
+    };
     const finish = (fn, value) => {
       if (!settled) {
         settled = true;
@@ -102,7 +156,10 @@ function execOverSsh(sshClient, command, { timeoutMs = EXEC_TIMEOUT_MS } = {}) {
       }
     };
     const timer = setTimeout(
-      () => finish(reject, new Error(`The PBX did not finish the resync command within ${Math.round(timeoutMs / 1000)}s.`)),
+      () => {
+        finish(reject, new Error(`The PBX did not finish the resync command within ${Math.round(timeoutMs / 1000)}s.`));
+        closeChannel();
+      },
       timeoutMs
     );
 
@@ -111,15 +168,27 @@ function execOverSsh(sshClient, command, { timeoutMs = EXEC_TIMEOUT_MS } = {}) {
         return finish(reject, error);
       }
 
-      let stdout = "";
-      let stderr = "";
+      channel = stream;
+      // The channel opened only after the wait ran out: nobody is listening any more.
+      if (settled) {
+        closeChannel();
+        return undefined;
+      }
+
+      const stdout = boundedCollector(maxOutputBytes);
+      const stderr = boundedCollector(maxOutputBytes);
       let code = null;
 
-      stream.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
-      stream.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+      stream.on("data", (chunk) => { stdout.add(chunk); });
+      stream.stderr.on("data", (chunk) => { stderr.add(chunk); });
       stream.on("exit", (exitCode) => { code = exitCode; });
       stream.on("close", (closeCode) => {
-        finish(resolve, { code: code == null ? closeCode : code, stdout, stderr });
+        finish(resolve, {
+          code: code == null ? closeCode : code,
+          stdout: stdout.text(),
+          stderr: stderr.text(),
+          truncated: stdout.truncated || stderr.truncated
+        });
       });
       stream.on("error", (streamError) => finish(reject, streamError));
       return undefined;
@@ -157,6 +226,7 @@ async function sendResync(sshClient, template, ext) {
 }
 
 module.exports = {
+  MAX_EXEC_OUTPUT_BYTES,
   DEFAULT_RESYNC_COMMAND,
   LEGACY_DEFAULT_RESYNC_COMMAND,
   EXT_PATTERN,

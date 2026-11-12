@@ -801,8 +801,12 @@ environment:
   TLS_KEY: /certs/privkey.pem
   COOKIE_SECURE: "true"
 volumes:
-  - /etc/letsencrypt/live/pbx.example.com:/certs:ro
+  - /opt/pbx-certs:/certs:ro
 ```
+
+The folder must hold the files themselves, readable by user 1000, which is who the app runs
+as in the container. Certbot's own folders do not qualify; see
+[What about Let's Encrypt?](#what-about-lets-encrypt) for the one-line fix.
 
 The app exits with an explanation rather than quietly falling back to HTTP if TLS is
 requested but cannot be set up.
@@ -828,16 +832,23 @@ address), or a certificate you already have.
 If you do want a real certificate on the app itself - for example to reach it directly by
 hostname without warnings - obtain it with any ACME client that supports **DNS-01** (certbot,
 acme.sh, lego), which needs no inbound access, and point `TLS_CERT`/`TLS_KEY` at the result.
-Mount certbot's `live` directory and the app picks up renewals when the container restarts:
+
+**Do not mount certbot's folders directly.** The files in `/etc/letsencrypt/live/<domain>`
+are links into `../../archive`, so mounting that folder leaves them pointing at nothing, and
+both folders are readable by root only while the app runs as user 1000. Either way the app
+stops with *TLS_CERT points at a file that does not exist*. Have certbot copy the pair to a
+folder the app can read, and restart it, each time a certificate is issued or renewed:
 
 ```bash
-certbot certonly --dns-cloudflare -d pbx.example.com
-```
-```bash
-docker compose restart pbx-manager
+sudo install -d -m 750 -o 1000 -g 1000 /opt/pbx-certs
+sudo certbot certonly --dns-cloudflare -d pbx.example.com \
+  --deploy-hook 'install -m 640 -o 1000 -g 1000 "$RENEWED_LINEAGE/fullchain.pem" "$RENEWED_LINEAGE/privkey.pem" /opt/pbx-certs/ && docker restart pbx-manager'
 ```
 
-Certificates are only read at startup, so schedule a restart after your renewal hook.
+Then mount `/opt/pbx-certs` at `/certs` as shown above. The hook is remembered, so renewals
+repeat it by themselves; certificates are only read when the app starts, which is why it ends
+with a restart. (The Caddy example does not need this: Caddy runs as root, so
+`deploy/caddy` mounts `/etc/letsencrypt` whole.)
 
 ### Behind Nginx Proxy Manager
 Use NPM purely for TLS and hostname routing and let the app's own sign-in handle

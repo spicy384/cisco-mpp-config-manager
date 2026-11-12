@@ -166,8 +166,22 @@ environment:
   TLS_CERT: /certs/fullchain.pem
   TLS_KEY: /certs/privkey.pem
 volumes:
-  - /etc/letsencrypt/live/pbx.example.com:/certs:ro
+  - /opt/pbx-certs:/certs:ro
 ```
 
 `TLS_CERT`/`TLS_KEY` take precedence over `TLS_ENABLED`. Certificates are read only
 at startup, so restart the container after a renewal.
+
+The folder must hold the files themselves, readable by user 1000 (who the app runs as in
+the container). Certbot's `/etc/letsencrypt/live/<domain>` does not work mounted directly:
+its files are links into `../../archive`, and both folders are root-only. Let certbot copy
+the pair out and restart the app whenever it issues or renews:
+
+```bash
+sudo install -d -m 750 -o 1000 -g 1000 /opt/pbx-certs
+sudo certbot certonly --dns-cloudflare -d pbx.example.com \
+  --deploy-hook 'install -m 640 -o 1000 -g 1000 "$RENEWED_LINEAGE/fullchain.pem" "$RENEWED_LINEAGE/privkey.pem" /opt/pbx-certs/ && docker restart pbx-manager'
+```
+
+This is about the **app's own** certificate. For Caddy's, see *Your own certificate* under
+[caddy/](#caddy---one-host-https-from-caddy) above.

@@ -90,9 +90,11 @@ services:
     # hashes, TOTP secrets and a private key.
     volumes:
       - pbx-data:/data
-      # To supply your own certificate, mount it read-only and set TLS_CERT/TLS_KEY above.
-      # Certbot's live directory works directly; renewals are picked up on restart.
-      # - /etc/letsencrypt/live/pbx.example.com:/certs:ro
+      # To supply your own certificate, mount its folder read-only and set TLS_CERT and
+      # TLS_KEY above. The files must be real files readable by user 1000 - not certbot's
+      # /etc/letsencrypt/live/<domain>, whose files are links and root-only. The README
+      # ("What about Let's Encrypt?") has a certbot hook that copies them here.
+      # - /opt/pbx-certs:/certs:ro
 
     # Run exactly one instance: the SFTP connection and in-flight bulk jobs are
     # held in memory, so a second replica would not share them.
